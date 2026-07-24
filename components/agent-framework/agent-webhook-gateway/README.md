@@ -111,6 +111,26 @@ npm run demo:dry-run
 
 成功时进程输出 `dry-run e2e passed` 和调用摘要，随后删除临时数据库。`npm test` 会自动执行同一场景。
 
+### Health MCP 跨仓库联调
+
+准备好 `smart-neckband` Health 功能分支的 Python 3.12 虚拟环境后，可在不启动模型、DIMOS、真实机器狗、采集设备或人体连接的情况下运行：
+
+```powershell
+$env:SMART_NECKBAND_HEALTH_ROOT = "C:/absolute/path/to/smart-neckband-health-worktree"
+$env:SMART_NECKBAND_HEALTH_PYTHON = "$env:SMART_NECKBAND_HEALTH_ROOT/pc_app/.venv/Scripts/python.exe"
+npm run demo:health-cross-repo
+```
+
+该命令使用临时端口、临时上游 Health SQLite、临时 Gateway SQLite 和公开测试密钥，运行真实的上游 Health store、Webhook sender、Pi Health receiver、durable queue 与上游 stdio MCP。它覆盖 `INT-001..010`、`INT-016`、`INT-017` 和 `INT-020` 的当前可自动化子集，并断言：
+
+- 首次投递为 `202 accepted`，权威 event/state 查询终态为 `verified_no_action`；
+- duplicate、raw-body conflict、错误签名、过期时间戳、Header/body ID、Schema、replay 和 event mismatch 均按契约处理；
+- 五路并发恰好一个 `accepted`、四个 `duplicate`；
+- current/previous key 可接受，未知 key 被拒绝；
+- Agent、DIMOS 和 robot 调用计数均为 0。
+
+该演示不替代 `INT-011..015`、`INT-018/019` 的故障/重启注入，也不等同于完整双方验收。成功时输出 `health cross-repo integration passed` 和不含 secret、签名或健康原始数据的摘要，并删除全部临时数据库。
+
 主要扩展边界：
 
 - 新的用户文本运行时实现 `UserTextAgent`；
