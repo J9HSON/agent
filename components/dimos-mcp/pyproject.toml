@@ -13,7 +13,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-go2 = ["dimos[unitree]==0.0.14b1"]
+go2 = [
+    "dimos[cuda,unitree]==0.0.14b1",
+    "onnxruntime==1.26.0",
+    "onnxruntime-gpu[cuda,cudnn]==1.26.0",
+]
 
 [project.scripts]
 dimos-dog-mcp = "dimos_dog_mcp.blueprint:main"

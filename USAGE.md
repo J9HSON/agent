@@ -38,7 +38,10 @@ Agent Webhook Gateway 不应直接连接底层机器狗 MCP，否则会绕过包
 
 - 使用 Python 3.10 至 3.12；推荐 Python 3.12。DIMOS 0.0.14b1 不支持 Python 3.13 及以上。
 - 默认 MCP 安装精确版本的 `dimos[web]` 和 `langchain-core`。`web` extra 提供 FastAPI/Uvicorn；`langchain-core` 是 DIMOS 0.0.14b1 生成 `@skill` 参数 schema 时实际导入的运行依赖。该组合不会额外启用完整的 `dimos[base]` 聚合 extra。
-- 真实 Go2 仍使用显式的 `dimos[unitree]` 可选依赖。DIMOS 上游将它建立在更大的 base 依赖集合上，因此只在实机部署确有需要时安装。
+- 真实 Go2 使用显式的 `dimos[cuda,unitree]` 可选依赖，并固定
+  `onnxruntime==1.26.0` 与 `onnxruntime-gpu[cuda,cudnn]==1.26.0`。该版本使用
+  CUDA 12，与 DIMOS `0.0.14b1` 固定的 `cupy-cuda12x` 一致；不要升级到默认使用
+  CUDA 13 的 ONNX Runtime 1.27。
 - 默认运行模式是 dry-run：不会连接、站立或移动真实机器狗。
 - 启用真实 Go2 前，必须完成场地隔离、独立急停、低延迟网络和厂商/DIMOS 网络预检。
 - Go2 模式会在官方连接、站立与平衡初始化完成后显式启用固件 joystick 输入。锁定版 DiMOS wheel 未公开 `switch_joystick` RPC，因此入口通过现有 `GO2Connection.publish_request` 向 Sport endpoint 发送 API `1027` / `data=true`。响应状态码不为 `0`、结构无效或调用抛出异常时，下层进程停止全部模块并启动失败；dry-run 不执行该调用。
@@ -135,6 +138,7 @@ dry-run 的 `tools/list` 仍返回完整 20 个工具，以保持上下层契约
 $env:ROBOT_IP = "机器狗 IP"
 $env:DIMOS_DOG_MCP_MODE = "go2"
 uv pip install -e "$repositoryPath/components/dimos-mcp[go2]"
+uv pip install --reinstall --no-deps "onnxruntime-gpu==1.26.0"
 dimos-dog-mcp
 ~~~
 
@@ -154,7 +158,14 @@ dimos-dog-gui
 
 若 Ubuntu 缺少 Tkinter，安装 `python3-tk` 后重试。界面的“估算距离”仅为速度乘以时间；它不读取里程计，也不证明机器狗精确移动或到达该距离。GUI 不存储机器人 IP、AES 密钥或运行模式，真机/干跑选择仍由下层 MCP 进程决定。
 
-在 WSL 进行本机真机控制时，可使用 `components/dimos-mcp/scripts/run-go2-mcp.sh` 代替手工导出变量。该脚本只读取 WSL 家目录中的 `$HOME/.config/dimos-dog-mcp/go2.env`，要求该文件权限为 `600`，并使用 WSL 虚拟环境中的 `dimos-dog-mcp` 启动真实 Go2 服务。密钥不能写入仓库；无密钥字段模板为 `components/dimos-mcp/config/go2.env.example`。服务端终端需保持运行，GUI 在另一 WSL 终端通过 `dimos-dog-gui` 启动。
+在 WSL 进行本机真机控制时，可使用
+`components/dimos-mcp/scripts/run-go2-mcp.sh` 代替手工导出变量。该脚本只读取 WSL
+家目录中的 `$HOME/.config/dimos-dog-mcp/go2.env`，要求该文件权限为 `600`；随后将
+虚拟环境中 NVIDIA CUDA 12/cuDNN wheel 的动态库目录加入当前进程环境，并在连接 Go2
+前验证 ONNX Runtime 的 `CUDAExecutionProvider` 可用。预检通过后才使用 WSL
+虚拟环境中的 `dimos-dog-mcp` 启动真实 Go2 服务。密钥不能写入仓库；无密钥字段模板为
+`components/dimos-mcp/config/go2.env.example`。服务端终端需保持运行，GUI 在另一 WSL
+终端通过 `dimos-dog-gui` 启动。
 
 ## 接入转发包装器
 
@@ -426,6 +437,7 @@ node node_modules/vitest/dist/cli.js --run test/health-mcp-client.test.ts
 | 包装器报告上游不可用 | 确认下层 `dimos-dog-mcp` 已启动，并检查 `DIMOS_MCP_WRAPPER_UPSTREAM_URL`。 |
 | 调用成功但机器狗不动 | 先确认不是 dry-run，并确认当前进程启动日志位于显式 joystick 握手上线之后；再同时观察 `/nav_cmd_vel`、`/cmd_vel` 和 `/odom`，区分规划输出、速度转发与底盘反馈。 |
 | 启动报错 `connection rejected joystick input enablement` | `SwitchJoystick` Sport 请求返回了非零状态码或无效响应；检查机器狗连接、当前运动模式和是否存在其他控制进程。进程已停止全部 DIMOS 模块，不能把该次启动视为可用。 |
+| 启动报错 `ONNX Runtime CUDA 预检失败`、只列出 `CPUExecutionProvider` 或缺少 `libcudart.so` | 重新安装当前项目的 `[go2]` extra，然后执行 `uv pip install --reinstall --no-deps "onnxruntime-gpu==1.26.0"`，确保同名 Python 包最终来自 GPU wheel；不要升级到 1.27。预检失败发生在连接 Go2 之前。 |
 | 官方硬件工具或散步工具返回 `required_mode=go2` | 当前下层是 dry-run；完成实机预检并安装 `[go2]` extra 后显式启用 Go2 模式。 |
 | 启动报错 `PerceiveLoopSkill ... AgentSpec ... No module met that spec` | 当前部署缺少 `StandaloneAgentBridge`，通常是底层包未更新或仍在运行旧的 editable-install 源码；更新 `components/dimos-mcp` 后重新安装并启动。不要通过加入官方 `McpClient` 修复，否则会在底层额外运行 LLM Agent。 |
 | 想用 hook 拦截危险动作 | 当前 hook 不是拦截器。应在下层实现明确、可测试的安全策略。 |

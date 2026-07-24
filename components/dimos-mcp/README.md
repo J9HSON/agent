@@ -34,7 +34,10 @@ flowchart LR
 - Python 3.10 至 3.12，推荐 Python 3.12。
 - DIMOS 固定为 `0.0.14b1`。
 - 基础安装固定使用 `dimos[web]==0.0.14b1` 和 `langchain-core==1.5.0`。后者是 DIMOS 生成 `@skill` 参数 schema 的实际运行依赖，并处于 DIMOS 声明的兼容范围内。
-- 真实 Unitree Go2 需要额外安装 `dimos[unitree]`。
+- 真实 Unitree Go2 需要额外安装 `dimos[cuda,unitree]`、CUDA 12 对应的
+  `onnxruntime==1.26.0` 与 `onnxruntime-gpu[cuda,cudnn]==1.26.0`。不能升级到
+  ONNX Runtime 1.27；其 PyPI GPU wheel 已切换到 CUDA 13，与 DIMOS
+  `0.0.14b1` 固定的 `cupy-cuda12x` 不兼容。
 - Go2 模式在官方连接、站立和平衡初始化完成后，通过锁定版已有的 `GO2Connection.publish_request` 显式发送 `SwitchJoystick` Sport 请求；响应失败、结构无效或抛出异常时停止全部模块并让启动失败。
 - 跨机器调用要求两台机器之间 TCP 网络可达。
 - 当前 MCP 没有身份认证，只能暴露在受信任网络中。
@@ -223,7 +226,14 @@ Ubuntu 缺少 Tk 时先安装系统包 `python3-tk`。该 GUI 不保存 Go2 IP�
 
 `scripts/run-go2-mcp.sh` 只在 WSL/Ubuntu 中运行真实 Go2 MCP。它从 WSL 私有文件 `$HOME/.config/dimos-dog-mcp/go2.env` 读取 Go2 IP、AES 密钥和监听配置；该文件必须是权限 `600`，不应位于仓库或 Git 中。仓库提供无密钥模板 `config/go2.env.example`。
 
-启动脚本会进入 Go2 模式，因此会执行 DIMOS Go2 连接的初始化流程；官方模块全部启动后，入口还会显式启用默认 `WIRELESS_CONTROLLER` 路径所需的 joystick 输入。只有官方调用返回成功后才打印 MCP listening 消息并进入主循环；调用失败或抛出异常时进程停止 coordinator 并退出。保持急停可用并让启动终端保持运行。GUI 在另一个 WSL 终端运行，默认连接同一 WSL 的 `127.0.0.1:9990`。
+启动脚本会先把虚拟环境中由 ONNX Runtime optional dependencies 安装的 NVIDIA
+动态库加入当前进程的 `LD_LIBRARY_PATH`，并验证
+`CUDAExecutionProvider` 可用；预检失败时不会连接 Go2。预检通过后脚本进入 Go2
+模式并执行 DIMOS Go2 连接的初始化流程；官方模块全部启动后，入口还会显式启用默认
+`WIRELESS_CONTROLLER` 路径所需的 joystick 输入。只有官方调用返回成功后才打印 MCP
+listening 消息并进入主循环；调用失败或抛出异常时进程停止 coordinator 并退出。保持
+急停可用并让启动终端保持运行。GUI 在另一个 WSL 终端运行，默认连接同一 WSL 的
+`127.0.0.1:9990`。
 
 ```bash
 bash /absolute/path/to/dimos-mcp/scripts/run-go2-mcp.sh
@@ -266,7 +276,12 @@ http://127.0.0.1:9991/mcp
 cd /absolute/path/to/dimos-mcp
 source .venv/bin/activate
 uv pip install -e '.[go2]'
+uv pip install --reinstall --no-deps 'onnxruntime-gpu==1.26.0'
 ```
+
+CPU 与 GPU wheel 都提供同名的 `onnxruntime` Python 包，因此必须让 GPU wheel
+最后安装；否则导入成功也可能只暴露 `CPUExecutionProvider`。启动脚本会在连接机器狗
+之前验证 `CUDAExecutionProvider`，预检失败时直接退出。
 
 然后显式启动：
 

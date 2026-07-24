@@ -5,6 +5,9 @@ set -Eeuo pipefail
 
 readonly ENV_FILE="${DIMOS_DOG_MCP_ENV_FILE:-"$HOME/.config/dimos-dog-mcp/go2.env"}"
 readonly MCP_LAUNCHER="${DIMOS_DOG_MCP_LAUNCHER:-"$HOME/dimensional-applications/.venv/bin/dimos-dog-mcp"}"
+readonly MCP_BIN_DIR="$(dirname "$MCP_LAUNCHER")"
+readonly MCP_VENV_DIR="$(cd "$MCP_BIN_DIR/.." && pwd)"
+readonly MCP_PYTHON="$MCP_BIN_DIR/python"
 
 fail() {
     printf '错误：%s\n' "$*" >&2
@@ -33,6 +36,22 @@ export DIMOS_DOG_MCP_PORT="${DIMOS_DOG_MCP_PORT:-9990}"
 export VIEWER="${VIEWER:-none}"
 
 [[ -x "$MCP_LAUNCHER" ]] || fail "找不到 WSL 虚拟环境中的 dimos-dog-mcp：$MCP_LAUNCHER"
+[[ -x "$MCP_PYTHON" ]] || fail "找不到 WSL 虚拟环境中的 Python：$MCP_PYTHON"
+
+nvidia_library_path=""
+for component in cublas cuda_nvrtc cuda_runtime cudnn cufft curand nvjitlink; do
+    for library_dir in "$MCP_VENV_DIR"/lib/python*/site-packages/nvidia/"$component"/lib; do
+        [[ -d "$library_dir" ]] || continue
+        nvidia_library_path="${nvidia_library_path:+$nvidia_library_path:}$library_dir"
+    done
+done
+[[ -n "$nvidia_library_path" ]] || fail \
+    "找不到 ONNX Runtime 所需的 NVIDIA runtime；请重新安装 dimos-dog-mcp[go2]"
+export LD_LIBRARY_PATH="$nvidia_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+"$MCP_PYTHON" -c \
+    'import onnxruntime as ort; providers = ort.get_available_providers(); assert "CUDAExecutionProvider" in providers, f"CUDAExecutionProvider unavailable: {providers}"' \
+    || fail "ONNX Runtime CUDA 预检失败；请最后执行 uv pip install --reinstall --no-deps onnxruntime-gpu==1.26.0"
 
 printf '启动真实 Go2 MCP：%s:%s/mcp\n' "$DIMOS_DOG_MCP_HOST" "$DIMOS_DOG_MCP_PORT"
 exec "$MCP_LAUNCHER"
