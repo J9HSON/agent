@@ -27,13 +27,16 @@ npm run build
 
 ## 配置与启动
 
-`AGENT_WEBHOOK_REPLY_URL` 是唯一必填环境变量：
+复制模板并填写部署值：
 
 ```powershell
-$env:AGENT_WEBHOOK_REPLY_URL = "http://reply-receiver:9080/agent-replies"
-$env:AGENT_WEBHOOK_MCP_URL = "http://127.0.0.1:9991/mcp"
-node dist/cli.js
+Copy-Item ".env.example" ".env"
+notepad ".env"
+npm run build
+npm run start
 ```
+
+`.env` 会被 Git 忽略。至少设置 `AGENT_WEBHOOK_REPLY_URL`；远程联调时还应将 `AGENT_WEBHOOK_MCP_URL` 指向远程 `dimos-mcp-wrapper` 的 `:9991/mcp`，不要直接连接 `dimos-dog-mcp`。`npm run start:dev` 使用同一 `.env` 直接运行 TypeScript 入口，适合本地调试。
 
 默认输入端点为：
 

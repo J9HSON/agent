@@ -8,6 +8,8 @@
 		"agent-webhook-gateway": "./dist/cli.js"
 	},
 	"scripts": {
+		"start": "node --env-file=.env dist/cli.js",
+		"start:dev": "node --env-file=.env src/cli.ts",
 		"check": "tsc --noEmit -p tsconfig.json",
 		"build": "tsc -p tsconfig.build.json",
 		"demo:dry-run": "node test/support/dry-run-demo.ts",

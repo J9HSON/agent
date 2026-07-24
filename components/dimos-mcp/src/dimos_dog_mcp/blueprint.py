@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import cache
+from importlib import import_module
+
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.global_config import global_config
@@ -17,21 +21,48 @@ from .server import DogMcpServer
 from .stop import StopAllSkill
 from .stroll import StrollSkill
 
-try:
-    from dimos.agents.skills.navigation import NavigationSkillContainer
-    from dimos.robot.unitree.go2.blueprints.smart.unitree_go2_spatial import (
-        unitree_go2_spatial,
-    )
-    from dimos.robot.unitree.go2.connection import GO2Connection
-    from dimos.robot.unitree.unitree_skill_container import UnitreeSkillContainer
 
-    from .go2_stop import Go2StopAllSkill
-except ModuleNotFoundError:
-    NavigationSkillContainer = None
-    unitree_go2_spatial = None
-    GO2Connection = None
-    UnitreeSkillContainer = None
-    Go2StopAllSkill = None
+@dataclass(frozen=True)
+class _Go2Dependencies:
+    navigation_skill_container: type[object]
+    unitree_go2_spatial: object
+    go2_connection: type[object]
+    unitree_skill_container: type[object]
+    go2_stop_all_skill: type[object]
+
+
+class Go2DependenciesUnavailableError(RuntimeError):
+    """Raised when Go2 mode is selected without its optional dependency stack."""
+
+
+@cache
+def _load_go2_dependencies() -> _Go2Dependencies:
+    """Load the optional Unitree stack only in processes that build or use it."""
+
+    try:
+        navigation_module = import_module("dimos.agents.skills.navigation")
+        spatial_module = import_module(
+            "dimos.robot.unitree.go2.blueprints.smart.unitree_go2_spatial"
+        )
+        connection_module = import_module("dimos.robot.unitree.go2.connection")
+        unitree_skills_module = import_module(
+            "dimos.robot.unitree.unitree_skill_container"
+        )
+        go2_stop_module = import_module(".go2_stop", package=__package__)
+    except ModuleNotFoundError as error:
+        missing_module = error.name or "unknown"
+        raise Go2DependenciesUnavailableError(
+            "Go2 navigation mode requires the optional dependency; "
+            f"install dimos-dog-mcp[go2] (missing module: {missing_module})"
+        ) from error
+
+    return _Go2Dependencies(
+        navigation_skill_container=navigation_module.NavigationSkillContainer,
+        unitree_go2_spatial=spatial_module.unitree_go2_spatial,
+        go2_connection=connection_module.GO2Connection,
+        unitree_skill_container=unitree_skills_module.UnitreeSkillContainer,
+        go2_stop_all_skill=go2_stop_module.Go2StopAllSkill,
+    )
 
 
 def build_blueprint():
@@ -51,26 +82,15 @@ def build_blueprint():
 def _build_go2_blueprint():
     """Compose the official DIMOS mapping, planning, exploration, and patrol stack."""
 
-    if (
-        NavigationSkillContainer is None
-        or unitree_go2_spatial is None
-        or GO2Connection is None
-        or UnitreeSkillContainer is None
-        or Go2StopAllSkill is None
-    ):
-        raise RuntimeError(
-            "Go2 navigation mode requires the optional dependency; "
-            "install dimos-dog-mcp[go2]"
-        )
-
+    dependencies = _load_go2_dependencies()
     return autoconnect(
-        unitree_go2_spatial,
-        NavigationSkillContainer.blueprint(),
-        UnitreeSkillContainer.blueprint(),
+        dependencies.unitree_go2_spatial,
+        dependencies.navigation_skill_container.blueprint(),
+        dependencies.unitree_skill_container.blueprint(),
         HomeNavigationSkill.blueprint(),
         StrollSkill.blueprint(),
         DogMotionSkill.blueprint(),
-        Go2StopAllSkill.blueprint(),
+        dependencies.go2_stop_all_skill.blueprint(),
         StandaloneAgentBridge.blueprint(),
         DogMcpServer.blueprint(),
     )
@@ -85,9 +105,8 @@ def configure_mcp_listener(config: McpServerConfig) -> None:
 def initialize_go2_runtime(coordinator: ModuleCoordinator) -> None:
     """Enable Go2 joystick input after all official modules have started."""
 
-    if GO2Connection is None:
-        raise RuntimeError("Go2 runtime is unavailable; install dimos-dog-mcp[go2]")
-    connection = coordinator.get_instance(GO2Connection)
+    dependencies = _load_go2_dependencies()
+    connection = coordinator.get_instance(dependencies.go2_connection)
     if connection is None:
         raise RuntimeError("Go2 runtime did not deploy GO2Connection")
     enable_go2_locomotion(connection)

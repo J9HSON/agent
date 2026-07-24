@@ -88,13 +88,13 @@ export class HealthNotificationService {
 						const outcome = await this.verifyAuthoritativeState(notification);
 						this.complete(notification, outcome, outcome.replaceAll("_", " "));
 					} catch (error) {
-							const retryDelay = Math.min(
-								Math.max(
-									Math.min(this.retryBaseMs * 2 ** pending.attempts, this.retryMaxMs),
-									error instanceof HealthMcpResultError && error.retryable ? (error.retryAfterMs ?? 0) : 0,
-								),
-								MAX_TIMER_DELAY_MS,
-							);
+						const retryDelay = Math.min(
+							Math.max(
+								Math.min(this.retryBaseMs * 2 ** pending.attempts, this.retryMaxMs),
+								error instanceof HealthMcpResultError && error.retryable ? (error.retryAfterMs ?? 0) : 0,
+							),
+							MAX_TIMER_DELAY_MS,
+						);
 						this.store.retryHealthNotification(pending.notificationId, Date.now() + retryDelay);
 						this.onBackgroundError(error);
 						return;

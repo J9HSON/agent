@@ -166,14 +166,15 @@ class DimosIntegrationTests(unittest.TestCase):
         from dimos.spec.utils import spec_structural_compliance
         from dimos_dog_mcp import blueprint as blueprint_module
         from dimos_dog_mcp.agent_bridge import StandaloneAgentBridge
-
-        if blueprint_module.unitree_go2_spatial is None:
-            self.skipTest("requires dimos-dog-mcp[go2]")
+        from dimos_dog_mcp.blueprint import Go2DependenciesUnavailableError
 
         previous_mode = os.environ.get("DIMOS_DOG_MCP_MODE")
         os.environ["DIMOS_DOG_MCP_MODE"] = "go2"
         try:
-            blueprint = blueprint_module.build_blueprint()
+            try:
+                blueprint = blueprint_module.build_blueprint()
+            except Go2DependenciesUnavailableError:
+                self.skipTest("requires dimos-dog-mcp[go2]")
         finally:
             if previous_mode is None:
                 os.environ.pop("DIMOS_DOG_MCP_MODE", None)
@@ -212,12 +213,17 @@ class DimosIntegrationTests(unittest.TestCase):
         perceive_loop = next(
             atom for atom in blueprint.active_blueprints if atom.module.__name__ == "PerceiveLoopSkill"
         )
+        standalone_agent_bridge = next(
+            atom
+            for atom in blueprint.active_blueprints
+            if atom.module is StandaloneAgentBridge
+        )
         agent_ref = next(
             module_ref
             for module_ref in perceive_loop.module_refs
             if module_ref.name == "_agent_spec"
         )
-        self.assertIs(
+        self.assertEqual(
             _resolve_single_ref(
                 perceive_loop,
                 agent_ref,
@@ -225,7 +231,7 @@ class DimosIntegrationTests(unittest.TestCase):
                 blueprint,
                 set(),
             ),
-            StandaloneAgentBridge,
+            standalone_agent_bridge.name,
         )
 
     def test_dry_run_does_not_start_motion(self) -> None:

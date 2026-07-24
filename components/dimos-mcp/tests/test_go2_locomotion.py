@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 import unittest
 from unittest.mock import patch
@@ -22,6 +23,25 @@ class RecordedCoordinator:
 
 
 class Go2LocomotionBootstrapTests(unittest.TestCase):
+    @unittest.skipUnless(HAS_SUPPORTED_DIMOS, "requires DIMOS on Python 3.10-3.12")
+    def test_importing_blueprint_does_not_initialize_optional_audio(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "import dimos_dog_mcp.blueprint; "
+                    "raise SystemExit('sounddevice' in sys.modules)"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_enable_explicitly_enables_firmware_joystick_input(self) -> None:
         from dimos_dog_mcp.go2_locomotion import (
             SPORT_REQUEST_TOPIC,
