@@ -97,6 +97,11 @@ class DogMcpTools:
 
         return self._forwarder.forward("return_to_start", {})
 
+    def return_to_user_and_greet(self) -> str:
+        """Forward the atomic return-to-user and greeting sequence."""
+
+        return self._forwarder.forward("return_to_user_and_greet", {})
+
     def begin_exploration(self) -> str:
         """Forward startup of DIMOS wavefront frontier exploration."""
 

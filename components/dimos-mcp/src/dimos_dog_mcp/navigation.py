@@ -74,6 +74,12 @@ class DryRunNavigationSkill(Module):
 
         return self._unavailable("return_to_start")
 
+    @skill
+    def return_to_user_and_greet(self) -> str:
+        """Report that user-location navigation and greeting require Go2 mode."""
+
+        return self._unavailable("return_to_user_and_greet")
+
     @rpc
     def stop_navigation(self) -> str:
         """Report that no live navigation stack is active in dry-run."""

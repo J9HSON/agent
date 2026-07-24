@@ -30,7 +30,7 @@
 3. 对相同 `instruction_id` 和相同 `text` 的重投做幂等去重。
 4. 拒绝相同 `instruction_id` 对应不同 `text` 的冲突请求。
 5. 将普通输入按持久化受理顺序串行交给一个固定 Pi Agent 会话。
-6. 只向该 Agent 暴露固定的 20 个机器狗 MCP 工具，并关闭 Pi 内建编码工具。
+6. 只向该 Agent 暴露固定的 21 个机器狗 MCP 工具，并关闭 Pi 内建编码工具。
 7. 将规范化后精确等于“停”或 `stop` 的文本作为停止快速路径处理。
 8. 将 Agent 最终回复或固定失败文本持久化到 outbox。
 9. 通过部署级回复 Webhook 发送完整的最终用户可见文本。
@@ -93,8 +93,8 @@ flowchart LR
 | 输入端 | 麦克风、唤醒、ASR、分段、确认一次完整真实请求、生成并持久化 `instruction_id`、提交和重试。 | 不直接调用 MCP，不指定 Agent 会话，不解释 `202` 为动作成功。 |
 | Agent Webhook Gateway | HTTP 校验、inbox/outbox、幂等、调度、固定 Agent 会话、停止快速路径和回复重投。 | 不采集音频，不判断一次 Webhook 是否是真实请求，不提供认证，不提供物理急停。 |
 | 固定 Pi Agent | 接收普通用户文本，根据系统提示词选择最终回复和 MCP 工具调用。 | 不接收外部会话 ID，不启用 Pi 内建编码工具、skills、extensions 或 context files。 |
-| MCP 包装器 | 将 DiMOS `0.0.14b1` 的 14 个非停止官方工具和 6 个自研工具单次转发到机器狗 MCP，并执行旁路生命周期 hook。 | 不接收用户自然语言，不重复运动命令，不承担 Webhook 回复投递。 |
-| 机器狗 MCP | 暴露版本化的 20 工具契约，验证自研运动参数，并在 dry-run 或 Go2 模式执行官方能力、导航扩展和统一停止编排。 | 不生成用户回复，不接收 `instruction_id`，不运行 OpenAI TTS 或需要 `ALIBABA_API_KEY` 的人员跟随。 |
+| MCP 包装器 | 将 DiMOS `0.0.14b1` 的 14 个非停止官方工具和 7 个自研工具单次转发到机器狗 MCP，并执行旁路生命周期 hook。 | 不接收用户自然语言，不重复运动命令，不承担 Webhook 回复投递。 |
+| 机器狗 MCP | 暴露版本化的 21 工具契约，验证自研运动参数，并在 dry-run 或 Go2 模式执行官方能力、导航扩展和统一停止编排。 | 不生成用户回复，不接收 `instruction_id`，不运行 OpenAI TTS 或需要 `ALIBABA_API_KEY` 的人员跟随。 |
 | 回复接收端 | 持久化并按 `reply_id` 去重，向最终用户显示或通过 TTS 朗读 `text`。 | 不期待模型 token、工具结果、内部错误或独立失败事件。 |
 
 ## 4. 输入端 HTTP 契约
@@ -305,7 +305,7 @@ HTTP `202` 只会在 `acceptInstruction` 完成后发送。
 - context files
 - Pi 内建编码工具
 
-当前只注册并保持激活以下 20 个自定义工具。它们全部向包装器发送一次同名 `tools/call`：
+当前只注册并保持激活以下 21 个自定义工具。它们全部向包装器发送一次同名 `tools/call`：
 
 | 工具 | 参数 | Gateway 到包装器的行为 |
 | --- | --- | --- |
@@ -325,10 +325,13 @@ HTTP `202` 只会在 `acceptInstruction` 完成后发送。
 | `tag_location` | `location_name: string` | 命名当前地图位置。 |
 | `navigate_with_text` | `query: string` | 以自然语言目的地启动官方导航。 |
 | `return_to_start` | 无 | 返回本次下层进程捕获的第一帧有效里程计位置。 |
+| `return_to_user_and_greet` | 无 | 单次调用包装器；底层返回精确标记的“用户身边”，确认到达后静止 1 秒，再执行 `Hello`。 |
 | `begin_exploration` | 无 | 启动覆盖式 Frontier 探索。 |
 | `start_patrol` | 无 | 在已建图区域启动官方覆盖巡逻。 |
 | `look_out_for` | `description_of_things: string[]`、可选 `then` | 持续查找目标，可在发现后调用另一工具。 |
 | `start_stroll` | 无 | 启动随机选支、不回头补覆盖的人类式散步。 |
+
+`return_to_user_and_greet` 是底层原子组合工具，不是实时人员跟随。部署者必须先在期望返回的位置调用 `tag_location(location_name="用户身边")`。底层拒绝其他近似标点；导航拒绝、取消、失败、100 秒超时或问候失败都会返回错误。只有导航 `is_goal_reached()` 成功后才进入硬性的 1 秒静止窗口，再调用官方 Unitree `Hello`。因此网关和包装器的默认 MCP 超时均为 120 秒。
 
 网关不会自动重试任何 MCP 工具调用。
 
@@ -437,6 +440,7 @@ HTTP `202` 只会在 `acceptInstruction` 完成后发送。
 | “探索一下未知区域” | 使用 `begin_exploration`，目标是尽量覆盖未知区域。 |
 | “开始巡逻” | 使用 `start_patrol`，只在已经建图的区域按官方覆盖路线巡视。 |
 | “像人一样随便散散步” | 使用 `start_stroll`，随机选择一条局部未知分支，放弃其他分支且不回头补覆盖。 |
+| “回到用户身边并打招呼” | 使用单个 `return_to_user_and_greet`；调用前应已通过 `tag_location` 标记“用户身边”，不得拆成导航、等待和问候三个调用。 |
 
 提示词中的计算规则：
 
@@ -455,7 +459,7 @@ HTTP `202` 只会在 `acceptInstruction` 完成后发送。
 上述自然语言语义目前只存在于：
 
 - Agent 系统提示词；
-- 20 个工具的名称、描述和 TypeBox 参数 schema。
+- 21 个工具的名称、描述和 TypeBox 参数 schema。
 
 当前不存在：
 
@@ -663,7 +667,7 @@ Content-Type: application/json; charset=utf-8
 | `AGENT_WEBHOOK_PORT` | 否 | `8080` | 1 至 65535 的正整数。 |
 | `AGENT_WEBHOOK_DATABASE_PATH` | 否 | `<cwd>/data/agent-webhook.sqlite` | SQLite inbox/outbox 路径。相对路径按网关进程 cwd 解析。 |
 | `AGENT_WEBHOOK_MCP_URL` | 否 | `http://127.0.0.1:9991/mcp` | MCP 包装器绝对 HTTP(S) URL。 |
-| `AGENT_WEBHOOK_MCP_TIMEOUT_MS` | 否 | `10000` | 单次 MCP HTTP 请求超时，必须是正有限数。 |
+| `AGENT_WEBHOOK_MCP_TIMEOUT_MS` | 否 | `120000` | 单次 MCP HTTP 请求超时，必须是正有限数；默认覆盖返航问候工具最长 100 秒导航、1 秒静止窗口和调用开销。 |
 | `AGENT_WEBHOOK_REPLY_TIMEOUT_MS` | 否 | `10000` | 单次回复回调超时，必须是正有限数。 |
 | `AGENT_WEBHOOK_RETRY_BASE_MS` | 否 | `1000` | 首次回调重试等待时间，必须是正有限数。 |
 | `AGENT_WEBHOOK_RETRY_MAX_MS` | 否 | `60000` | 指数重试等待上限，必须是正有限数。当前不要求它大于 base。 |
@@ -913,7 +917,7 @@ npx tsc -p tsconfig.json --noEmit
 - MCP `result.isError` 被识别为失败。
 - DIMOS 异常文本和结构化工具错误被识别为失败。
 - 系统提示词包含“最终输出会直接发给用户”和运动语义。
-- 固定 Agent 只激活版本化的 20 个机器狗工具。
+- 固定 Agent 只激活版本化的 21 个机器狗工具。
 - 必填回复 URL 和主要默认配置。
 
 当前自动化测试没有覆盖：
@@ -958,8 +962,8 @@ npx tsc -p tsconfig.json --noEmit
 - [ ] Pi 模型和认证在 `AGENT_WEBHOOK_AGENT_DIR` 中有效。
 - [ ] 包装器 MCP 可从网关主机访问。
 - [ ] 机器狗 MCP 初次联调运行在 dry-run。
-- [ ] `tools/list` 在底层和包装器均精确返回版本化的 20 个工具，且不包含 `speak`、人员跟随或专项停止工具。
-- [ ] 20 个工具在真实包装器链路上保持同名、同参数、单次转发。
+- [ ] `tools/list` 在底层和包装器均精确返回版本化的 21 个工具，且不包含 `speak`、人员跟随或专项停止工具。
+- [ ] 21 个工具在真实包装器链路上保持同名、同参数、单次转发。
 - [ ] 每个工具调用只到达下游一次。
 - [ ] “停”、“停。”、“ STOP ”和“stop!”绕过 Agent。
 - [ ] “别停”、“停止”、“请停下来”和“stop now”不会误入快速路径。
@@ -977,6 +981,7 @@ npx tsc -p tsconfig.json --noEmit
 - [ ] “1 秒”“以 0.1 米每秒走”和“走一点”只追问，不调用运动工具。
 - [ ] 左、右、转向不会被错误映射为前进或后退。
 - [ ] “探索未知区域”“已建图巡逻”“像人一样散步”分别调用 `begin_exploration`、`start_patrol`、`start_stroll`。
+- [ ] “回到用户身边并打招呼”只调用一次 `return_to_user_and_greet`，并且目标环境已预先标记精确名称“用户身边”。
 - [ ] 停止任意后台行为时只调用 `stop_all`，不调用专项停止工具。
 - [ ] 最终回复不声称已经精确到达指定距离。
 - [ ] 最终回复直接面向用户，不包含内部推理、工具结构或异常堆栈。

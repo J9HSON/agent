@@ -33,6 +33,7 @@ CUSTOM_TOOL_NAMES = frozenset(
         "move_backward",
         "motion_status",
         "return_to_start",
+        "return_to_user_and_greet",
         "start_stroll",
         "stop_all",
     }

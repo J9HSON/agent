@@ -28,6 +28,7 @@ class _Go2Dependencies:
     unitree_go2_spatial: object
     go2_connection: type[object]
     unitree_skill_container: type[object]
+    return_to_user_and_greet_skill: type[object]
     go2_stop_all_skill: type[object]
 
 
@@ -48,6 +49,7 @@ def _load_go2_dependencies() -> _Go2Dependencies:
         unitree_skills_module = import_module(
             "dimos.robot.unitree.unitree_skill_container"
         )
+        return_to_user_module = import_module(".return_to_user", package=__package__)
         go2_stop_module = import_module(".go2_stop", package=__package__)
     except ModuleNotFoundError as error:
         missing_module = error.name or "unknown"
@@ -61,6 +63,7 @@ def _load_go2_dependencies() -> _Go2Dependencies:
         unitree_go2_spatial=spatial_module.unitree_go2_spatial,
         go2_connection=connection_module.GO2Connection,
         unitree_skill_container=unitree_skills_module.UnitreeSkillContainer,
+        return_to_user_and_greet_skill=return_to_user_module.ReturnToUserAndGreetSkill,
         go2_stop_all_skill=go2_stop_module.Go2StopAllSkill,
     )
 
@@ -87,6 +90,7 @@ def _build_go2_blueprint():
         dependencies.unitree_go2_spatial,
         dependencies.navigation_skill_container.blueprint(),
         dependencies.unitree_skill_container.blueprint(),
+        dependencies.return_to_user_and_greet_skill.blueprint(),
         HomeNavigationSkill.blueprint(),
         StrollSkill.blueprint(),
         DogMotionSkill.blueprint(),

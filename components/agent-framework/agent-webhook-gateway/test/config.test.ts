@@ -14,6 +14,7 @@ describe("gateway configuration", () => {
 			port: 8080,
 			replyWebhookUrl: "http://127.0.0.1:9080/replies",
 			mcpWrapperUrl: "http://127.0.0.1:9991/mcp",
+			mcpTimeoutMs: 120_000,
 			defaultSpeedMps: 0.1,
 			health: undefined,
 		});

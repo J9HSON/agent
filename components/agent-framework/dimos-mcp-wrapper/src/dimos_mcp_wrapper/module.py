@@ -180,6 +180,12 @@ class McpForwardingSkill(Module):
         return self._dog_tools.return_to_start()
 
     @skill
+    def return_to_user_and_greet(self) -> str:
+        """Return to the fixed user location, settle for one second, and greet."""
+
+        return self._dog_tools.return_to_user_and_greet()
+
+    @skill
     def begin_exploration(self) -> str:
         """Start official DIMOS wavefront frontier exploration."""
 

@@ -35,7 +35,7 @@
 - 导航行为：`tag_location`、`navigate_with_text`、`stop_navigation`、`begin_exploration`、`end_exploration`、`start_patrol`、`stop_patrol`。
 - 感知与交互：`look_out_for`、`stop_looking_out`、`follow_person`、`stop_following`、`speak`。
 
-官方清单仍保留上述 21 个工具这一事实，但本项目只将其中 14 个非停止工具纳入下层、包装器和固定 Agent 的版本化公开契约，并与 6 个自研工具共同形成 20 工具契约。官方 `stop_navigation`、`end_exploration`、`stop_patrol` 和 `stop_looking_out` 仍由底层 `stop_all` 在进程内调用，但不再作为独立 MCP 工具公开。`speak` 被明确排除，因为官方 `SpeakSkill` 在模块启动阶段初始化 OpenAI TTS；项目的最终用户语音由回复接收端处理，底层不应因此要求 OpenAI 凭据。`follow_person` 和 `stop_following` 也被明确排除，底层不再组合 `PersonFollowSkillContainer`，因为该链路要求本项目不支持的 `ALIBABA_API_KEY`；包装器和固定 Agent 也不得重新声明这两个工具。`start_stroll` 是自研扩展，不是官方预制能力：它复用官方 Wavefront Frontier 检测和导航，但在局部未知分支中随机选择一条，退休其他分支，并拒绝回头补覆盖；它的内部停止方法同样由 `stop_all` 编排。官方 `start_patrol` 使用已建图区域的 coverage router；官方 `begin_exploration` 会持续寻找 Frontier 以扩展覆盖，两者都不等同于这种有意遗漏区域的人类式散步。
+官方清单仍保留上述 21 个工具这一事实，但本项目只将其中 14 个非停止工具纳入下层、包装器和固定 Agent 的版本化公开契约，并与 7 个自研工具共同形成 21 工具契约。官方 `stop_navigation`、`end_exploration`、`stop_patrol` 和 `stop_looking_out` 仍由底层 `stop_all` 在进程内调用，但不再作为独立 MCP 工具公开。`speak` 被明确排除，因为官方 `SpeakSkill` 在模块启动阶段初始化 OpenAI TTS；项目的最终用户语音由回复接收端处理，底层不应因此要求 OpenAI 凭据。`follow_person` 和 `stop_following` 也被明确排除，底层不再组合 `PersonFollowSkillContainer`，因为该链路要求本项目不支持的 `ALIBABA_API_KEY`；包装器和固定 Agent 也不得重新声明这两个工具。`return_to_user_and_greet` 使用预先标记且名称精确为“用户身边”的固定地图点，在导航成功后静止 1 秒再复用官方 `Hello` 动作；它不是人员跟随。`start_stroll` 是自研扩展，不是官方预制能力：它复用官方 Wavefront Frontier 检测和导航，但在局部未知分支中随机选择一条，退休其他分支，并拒绝回头补覆盖；它的内部停止方法同样由 `stop_all` 编排。官方 `start_patrol` 使用已建图区域的 coverage router；官方 `begin_exploration` 会持续寻找 Frontier 以扩展覆盖，两者都不等同于这种有意遗漏区域的人类式散步。
 
 ## 已知边界
 

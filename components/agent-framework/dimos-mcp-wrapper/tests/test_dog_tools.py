@@ -35,6 +35,10 @@ class DogMcpToolsTests(unittest.TestCase):
         self.assertEqual(tools.tag_location("门口"), "tag_location")
         self.assertEqual(tools.navigate_with_text("去门口"), "navigate_with_text")
         self.assertEqual(tools.return_to_start(), "return_to_start")
+        self.assertEqual(
+            tools.return_to_user_and_greet(),
+            "return_to_user_and_greet",
+        )
         self.assertEqual(tools.begin_exploration(), "begin_exploration")
         self.assertEqual(tools.start_patrol(), "start_patrol")
         self.assertEqual(tools.look_out_for(["人"], None), "look_out_for")
@@ -59,6 +63,7 @@ class DogMcpToolsTests(unittest.TestCase):
                 ("tag_location", {"location_name": "门口"}),
                 ("navigate_with_text", {"query": "去门口"}),
                 ("return_to_start", {}),
+                ("return_to_user_and_greet", {}),
                 ("begin_exploration", {}),
                 ("start_patrol", {}),
                 ("look_out_for", {"description_of_things": ["人"], "then": None}),

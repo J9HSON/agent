@@ -1,6 +1,6 @@
 # Agent Webhook Gateway
 
-该服务实现固定 Pi Agent 会话的持久化输入网关和输出投递器，并可选实现智能项圈 Health MCP v0.2 的独立消费端。输入端只提交用户文本；Agent 通过 `dimos-mcp-wrapper` 使用 DiMOS `0.0.14b1` 的 14 个非停止官方工具和 6 个自研工具；回复接收端只收到完整的最终用户可见文本，并可在上层进行 TTS。Health 通知使用独立验签、表、队列和 stdio MCP client，不进入 Agent，也不触发物理动作。
+该服务实现固定 Pi Agent 会话的持久化输入网关和输出投递器，并可选实现智能项圈 Health MCP v0.2 的独立消费端。输入端只提交用户文本；Agent 通过 `dimos-mcp-wrapper` 使用 DiMOS `0.0.14b1` 的 14 个非停止官方工具和 7 个自研工具；回复接收端只收到完整的最终用户可见文本，并可在上层进行 TTS。Health 通知使用独立验签、表、队列和 stdio MCP client，不进入 Agent，也不触发物理动作。
 
 ```mermaid
 flowchart LR
@@ -51,7 +51,7 @@ POST http://127.0.0.1:8080/v1/instructions
 | `AGENT_WEBHOOK_PORT` | `8080` | 输入网关监听端口。 |
 | `AGENT_WEBHOOK_DATABASE_PATH` | `<cwd>/data/agent-webhook.sqlite` | 持久化 inbox/outbox 的 SQLite 文件。 |
 | `AGENT_WEBHOOK_MCP_URL` | `http://127.0.0.1:9991/mcp` | `dimos-mcp-wrapper` 的 HTTP MCP URL。 |
-| `AGENT_WEBHOOK_MCP_TIMEOUT_MS` | `10000` | 单次 MCP 请求超时。运动工具不会自动重试。 |
+| `AGENT_WEBHOOK_MCP_TIMEOUT_MS` | `120000` | 单次 MCP 请求超时；默认覆盖返航问候工具最长 100 秒导航、1 秒静止窗口和调用开销。运动工具不会自动重试。 |
 | `AGENT_WEBHOOK_REPLY_TIMEOUT_MS` | `10000` | 单次回复回调超时。 |
 | `AGENT_WEBHOOK_RETRY_BASE_MS` | `1000` | 回复回调失败后的重投等待时间。 |
 | `AGENT_WEBHOOK_RETRY_MAX_MS` | `60000` | 回复重投等待时间的上限。 |
@@ -77,6 +77,7 @@ POST http://127.0.0.1:8080/v1/instructions
 - “停”或 `stop` 的精确规范化匹配绕过 Agent，单次调用 `stop_all`。
 - 固定 Agent 明确拒绝 `Bound` 以及任何前空翻、后空翻、侧空翻、连续空翻或其他 `flip` / `somersault` 动作；它不会为这些请求调用 `execute_sport_command` 或其他运动工具，也不会改写成替代动作。
 - 具名目的地使用 `navigate_with_text`；未知区域覆盖探索、已建图覆盖巡逻和非覆盖式人类散步分别使用 `begin_exploration`、`start_patrol`、`start_stroll`。
+- “回到用户身边并打招呼”使用单个 `return_to_user_and_greet`；调用前必须已将目标点标记为“用户身边”，底层确认到达后静止 1 秒再执行 `Hello`，Agent 不拆分为多个工具调用。
 - `stop_all` 由底层统一尝试停止定时速度、定点导航、探索、巡逻、散步和持续视觉查找；Agent 和快速路径都不再调用专项停止工具。
 - Agent 或停止调用失败时仍产生普通回复事件，文本固定为“暂时无法完成此请求，请稍后重试。”。
 - outbox 先持久化再回调。回调失败只重投同一 `reply_id`，不会重跑 Agent 或 MCP 工具。

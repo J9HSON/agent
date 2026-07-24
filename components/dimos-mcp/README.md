@@ -1,6 +1,6 @@
 # 独立 DIMOS 机器狗 MCP
 
-`dimos-mcp` 是部署在机器狗侧主机上的独立底层 MCP。它不依赖 Agent Webhook Gateway 或 MCP 包装器运行。它公开 DiMOS `0.0.14b1` 的 14 个非停止官方工具，以及 6 个自研工具；Go2 模式组合官方空间、导航和机器人技能，但不运行模型、Agent 循环、云端 TTS 或人员跟随。
+`dimos-mcp` 是部署在机器狗侧主机上的独立底层 MCP。它不依赖 Agent Webhook Gateway 或 MCP 包装器运行。它公开 DiMOS `0.0.14b1` 的 14 个非停止官方工具，以及 7 个自研工具；Go2 模式组合官方空间、导航和机器人技能，但不运行模型、Agent 循环、云端 TTS 或人员跟随。
 
 ```mermaid
 flowchart LR
@@ -13,7 +13,7 @@ flowchart LR
 
 ## 模块接口
 
-服务固定暴露 20 个工具。完整参数与语义表见根目录 `USAGE.md`：
+服务固定暴露 21 个工具。完整参数与语义表见根目录 `USAGE.md`：
 
 | 工具 | 参数 | 行为 |
 | --- | --- | --- |
@@ -23,6 +23,7 @@ flowchart LR
 | `motion_status` | 无 | 返回本地命令执行状态，不是机器狗遥测。 |
 | 14 个 DiMOS 官方工具 | 官方 `0.0.14b1` 签名 | 管理、相对移动、设备状态、导航、探索、巡逻与感知；不包含语音、人员跟随或专项停止工具。 |
 | `return_to_start` | 无 | 返回本次下层进程捕获的第一帧有效里程计位置。 |
+| `return_to_user_and_greet` | 无 | 返回精确标记的“用户身边”，确认到达后静止 1 秒，再执行 `Hello`。 |
 | `start_stroll` | 无 | 随机选择一个局部未知分支，退休其他分支并避免回头补覆盖。 |
 
 速度和时长必须是正有限数值。当前不设置硬编码数值上限；dry-run 和 Go2 都使用同一运动状态机并拒绝重叠运动。可预期的参数或互斥错误返回 `{"status":"error","error":"..."}` 文本结果。MCP 请求返回只表示底层命令处理结果，不证明机器狗已经到达目标位置。
@@ -168,6 +169,7 @@ begin_exploration
 start_patrol
 look_out_for
 return_to_start
+return_to_user_and_greet
 start_stroll
 ```
 
@@ -294,6 +296,8 @@ dimos-dog-mcp
 ```
 
 Go2 模式复用 DiMOS 官方 `unitree_go2_spatial` Blueprint，并组合官方导航、Unitree 和感知技能。`ModuleCoordinator.build()` 完成所有官方模块启动后，入口同步通过 `GO2Connection.publish_request` 向 `rt/api/sport/request` 发送 API `1027` / `data=true`，避免导航已经产生 `cmd_vel`、但 Go2 固件静默忽略默认 `WIRELESS_CONTROLLER` 帧。响应状态码不为 `0`、结构无效或抛出异常时，进程停止全部模块并失败退出。官方 `SpeakSkill` 不组合：它会在启动阶段初始化 OpenAI TTS，而本项目由上层回复接收端完成最终用户 TTS，因此底层启动不需要 `OPENAI_API_KEY`。官方 `PersonFollowSkillContainer` 也不组合，因为其人员跟随链路要求本项目不支持的 `ALIBABA_API_KEY`；因此 `follow_person` 和 `stop_following` 不会出现在 `tools/list`。自研 `StrollSkill` 复用官方 Frontier 检测与导航，只替换为随机选支、退休旁支、拒绝回头补覆盖的目标策略。
+
+`return_to_user_and_greet` 使用预先调用 `tag_location(location_name="用户身边")` 保存的固定地图点，不执行实时人员跟随。它拒绝其他近似标点，最多等待导航 100 秒；只有 `is_goal_reached()` 成功后才静止 1 秒并向官方 `UnitreeSkillContainer` 提交 `Hello`。任一步失败都不会提前问候。
 
 官方 `PerceiveLoopSkill` 声明了必需的 `AgentSpec` 引用。独立底层不应为此引入官方 `McpClient`，因为它会额外创建模型和 Agent 循环。本组件改由无模型的 `StandaloneAgentBridge` 满足该引用：`look_out_for` 没有 `then` 时仍通过 MCP 工具流通知上层；设置 `then` 时，桥接器只向当前进程的本机 MCP endpoint 单次调用指定的公开工具。
 

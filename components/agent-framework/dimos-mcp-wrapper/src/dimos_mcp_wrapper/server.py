@@ -26,6 +26,7 @@ PUBLIC_TOOL_NAMES = frozenset(
         "tag_location",
         "navigate_with_text",
         "return_to_start",
+        "return_to_user_and_greet",
         "begin_exploration",
         "start_patrol",
         "look_out_for",

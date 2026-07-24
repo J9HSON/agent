@@ -30,6 +30,7 @@ export function buildAgentSystemPrompt(defaultSpeedMps: number): string {
 - 用户指定具名地点或自然语言目的地时，可调用 navigate_with_text；不得把它改写成定时直行。
 - tag_location 只用于把机器狗当前地图位置保存为名称。
 - “回到起点”或“返回启动位置”使用 return_to_start；它返回本次下层进程捕获的第一帧有效里程计位置，不依赖手工打点。
+- “回到用户身边并打招呼”使用 return_to_user_and_greet；调用前必须已用 tag_location 标记“用户身边”，底层确认到达后静止 1 秒再执行 Hello，禁止拆成多个工具调用。
 - “探索未知区域并尽量覆盖”使用 begin_exploration；“在已建图区域来回巡视”使用 start_patrol；“像人散步一样随机选一条未知分支并放弃其他分支”使用 start_stroll，三者不得混为一谈。
 - 停止任何活动都使用 stop_all；它会统一停止定时速度、定点导航、探索、巡逻、散步和持续视觉查找。
 - 导航、探索、巡逻、散步、视觉和设备控制只在下层 Go2 模式可用；下层返回 dry-run 或错误时，必须如实告诉用户没有启动真实能力。
@@ -305,6 +306,13 @@ export function createDogTools(mcp: McpToolCaller) {
 		"返回本次运行的启动位置",
 	);
 
+	const returnToUserAndGreet = noArgumentTool(
+		"return_to_user_and_greet",
+		"Return To User And Greet",
+		"导航到预先标记的“用户身边”，确认到达后静止 1 秒，再执行 Unitree Hello 问候动作。",
+		"回到用户身边，静止一秒后打招呼",
+	);
+
 	const beginExploration = defineTool({
 		name: "begin_exploration",
 		label: "Begin Exploration",
@@ -391,6 +399,7 @@ export function createDogTools(mcp: McpToolCaller) {
 		tagLocation,
 		navigateWithText,
 		returnToStart,
+		returnToUserAndGreet,
 		beginExploration,
 		startPatrol,
 		lookOutFor,

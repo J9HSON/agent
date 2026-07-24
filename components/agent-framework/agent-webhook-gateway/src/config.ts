@@ -166,7 +166,7 @@ export function readGatewayConfig(
 		),
 		replyWebhookUrl: readHttpUrl(environment, "AGENT_WEBHOOK_REPLY_URL"),
 		mcpWrapperUrl: readHttpUrl(environment, "AGENT_WEBHOOK_MCP_URL", "http://127.0.0.1:9991/mcp"),
-		mcpTimeoutMs: readPositiveNumber(environment, "AGENT_WEBHOOK_MCP_TIMEOUT_MS", 10_000),
+		mcpTimeoutMs: readPositiveNumber(environment, "AGENT_WEBHOOK_MCP_TIMEOUT_MS", 120_000),
 		replyTimeoutMs: readPositiveNumber(environment, "AGENT_WEBHOOK_REPLY_TIMEOUT_MS", 10_000),
 		retryBaseMs: readPositiveNumber(environment, "AGENT_WEBHOOK_RETRY_BASE_MS", 1_000),
 		retryMaxMs: readPositiveNumber(environment, "AGENT_WEBHOOK_RETRY_MAX_MS", 60_000),

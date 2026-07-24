@@ -9,13 +9,14 @@ from dimos_dog_mcp.tool_contract import PUBLIC_TOOL_NAMES
 
 class StrollPolicyTests(unittest.TestCase):
     def test_versioned_public_contract_exposes_only_the_unified_stop_tool(self) -> None:
-        self.assertEqual(len(PUBLIC_TOOL_NAMES), 20)
+        self.assertEqual(len(PUBLIC_TOOL_NAMES), 21)
         self.assertTrue(
             {
                 "server_status",
                 "observe",
                 "start_patrol",
                 "return_to_start",
+                "return_to_user_and_greet",
                 "start_stroll",
                 "stop_all",
             }

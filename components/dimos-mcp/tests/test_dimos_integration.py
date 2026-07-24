@@ -98,6 +98,7 @@ class DimosIntegrationTests(unittest.TestCase):
                 "start_patrol",
                 "look_out_for",
                 "return_to_start",
+                "return_to_user_and_greet",
                 "start_stroll",
             },
         )
@@ -154,6 +155,20 @@ class DimosIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["status"], "error")
         self.assertEqual(payload["required_mode"], "go2")
 
+    def test_dry_run_return_to_user_and_greet_reports_that_go2_mode_is_required(
+        self,
+    ) -> None:
+        result = self._adapter.call(
+            "tools/call",
+            {
+                "name": "return_to_user_and_greet",
+                "arguments": {},
+            },
+        )
+        payload = json.loads(result["result"]["content"][0]["text"])
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["required_mode"], "go2")
+
     def test_server_is_running_on_the_configured_remote_listener(self) -> None:
         self.assertEqual(self._global_config.listen_host, "0.0.0.0")
         self.assertEqual(self._global_config.mcp_port, self._test_port)
@@ -201,6 +216,7 @@ class DimosIntegrationTests(unittest.TestCase):
                 "UnitreeSkillContainer",
                 "PerceiveLoopSkill",
                 "HomeNavigationSkill",
+                "ReturnToUserAndGreetSkill",
                 "StrollSkill",
                 "DogMotionSkill",
                 "Go2StopAllSkill",

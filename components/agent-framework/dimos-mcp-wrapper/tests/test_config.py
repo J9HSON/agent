@@ -6,6 +6,13 @@ from dimos_mcp_wrapper.config import read_wrapper_config
 
 
 class WrapperConfigTests(unittest.TestCase):
+    def test_default_timeout_covers_the_atomic_return_and_greeting_workflow(
+        self,
+    ) -> None:
+        config = read_wrapper_config({})
+
+        self.assertEqual(config.timeout_s, 120.0)
+
     def test_reads_explicit_upstream_endpoint_port_and_timeout(self) -> None:
         config = read_wrapper_config(
             {

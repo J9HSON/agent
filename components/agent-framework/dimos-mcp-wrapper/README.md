@@ -43,7 +43,7 @@ claude mcp add --transport http --scope project dimos-dog-wrapper http://127.0.0
 
 ## 工具
 
-包装器暴露与上游同名的全部 20 个工具，并将参数不变地单次转发：
+包装器暴露与上游同名的全部 21 个工具，并将参数不变地单次转发：
 
 | 工具 | 上游工具 | 说明 |
 | --- | --- | --- |
@@ -53,11 +53,12 @@ claude mcp add --transport http --scope project dimos-dog-wrapper http://127.0.0
 | `motion_status` | `motion_status` | 转发上游本地运动状态。 |
 | 14 个 DiMOS 官方工具 | 同名官方工具 | 按 DiMOS `0.0.14b1` 官方签名转发管理、移动、状态、导航和感知能力；不暴露语音、人员跟随或专项停止工具。 |
 | `return_to_start` | `return_to_start` | 转发返回本次下层进程启动位置的请求。 |
+| `return_to_user_and_greet` | `return_to_user_and_greet` | 单次转发原子化的返航、到达后 1 秒静止与 `Hello` 问候流程。 |
 | `start_stroll` | `start_stroll` | 启动随机选支、非覆盖式的人类式散步。 |
 
 速度、持续时间、dry-run/Go2 模式、最终零速度停止、官方能力和散步算法均由上游 `dimos-dog-mcp` 负责。包装器不连接硬件、不运行路径规划，也不伪造遥测。dry-run 的硬件能力错误会按普通上游错误触发 `after_error`。
 
-包装器 endpoint 公开上述完整 20 工具。所有工具均通过同一个 `ForwardingService`，所以都支持同时配置四种 hook。被底层排除的人员跟随和专项停止工具不会由包装器重新声明或转发。
+包装器 endpoint 公开上述完整 21 工具。所有工具均通过同一个 `ForwardingService`，所以都支持同时配置四种 hook。被底层排除的人员跟随和专项停止工具不会由包装器重新声明或转发。
 
 ## 配置
 
@@ -65,7 +66,7 @@ claude mcp add --transport http --scope project dimos-dog-wrapper http://127.0.0
 | --- | --- | --- |
 | `DIMOS_MCP_WRAPPER_UPSTREAM_URL` | `http://127.0.0.1:9990/mcp` | 上游 MCP 的完整 HTTP URL。 |
 | `DIMOS_MCP_WRAPPER_PORT` | `9991` | 包装器的 DIMOS MCP 监听端口。 |
-| `DIMOS_MCP_WRAPPER_TIMEOUT_S` | `10.0` | 单次上游请求的超时秒数。 |
+| `DIMOS_MCP_WRAPPER_TIMEOUT_S` | `120.0` | 单次上游请求的超时秒数；默认覆盖最长 100 秒导航、1 秒静止窗口和调用开销。 |
 
 上游请求采用一条标准 JSON-RPC `tools/call` HTTP POST。网络失败、HTTP 失败或 MCP 错误会返回给调用方；包装器不会自动重试运动类命令。
 

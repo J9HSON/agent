@@ -25,6 +25,14 @@ describe("fixed Pi agent runtime", () => {
 		expect(prompt).toContain("不得改写或映射为其他动作");
 	});
 
+	it("uses the atomic return-to-user greeting tool for that workflow", () => {
+		const prompt = buildAgentSystemPrompt(0.1);
+
+		expect(prompt).toContain("用户身边");
+		expect(prompt).toContain("return_to_user_and_greet");
+		expect(prompt).toContain("到达后静止 1 秒");
+	});
+
 	it("registers supported pinned official and custom wrapper MCP tools", () => {
 		const tools = createDogTools({
 			callTool: async () => "accepted",
@@ -47,6 +55,7 @@ describe("fixed Pi agent runtime", () => {
 			"tag_location",
 			"navigate_with_text",
 			"return_to_start",
+			"return_to_user_and_greet",
 			"begin_exploration",
 			"start_patrol",
 			"look_out_for",
@@ -82,6 +91,7 @@ describe("fixed Pi agent runtime", () => {
 				"tag_location",
 				"navigate_with_text",
 				"return_to_start",
+				"return_to_user_and_greet",
 				"begin_exploration",
 				"start_patrol",
 				"look_out_for",
