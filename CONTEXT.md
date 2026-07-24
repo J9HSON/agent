@@ -83,6 +83,7 @@ flowchart LR
 29. Health Webhook body 只作为唤醒通知。ACK 只表示通知已验签、按 raw-body digest 原子持久化和入队；处理方必须再查询 `health.get_event_details` 与 `health.get_current_state`。
 30. Health 消费方在固定代码中要求 contract `0.2.0`、event revision 不回退、wearer/source 一致、`data_source=live`、`test_mode=false` 和 `freshness=fresh`。任何失败都不得使用旧生理值或交给 LLM 绕过。
 31. v0.2 Health 事件不得调用 Agent、DimOS 或机器狗工具。`verified_no_action` 只表示权威状态检查与审计完成，不表示健康正常、医学安全或任何物理动作完成。
+32. 固定 Agent 的系统提示词必须拒绝 `Bound` 以及所有空翻请求，不得调用 `execute_sport_command` 或其他运动工具，也不得改写为替代动作。该限制只约束固定 Agent，不改变 20 工具 MCP 契约，也不是程序级安全门；直接 MCP Host 不受该提示词约束。
 
 ## 运行约束
 
@@ -103,7 +104,7 @@ flowchart LR
 - Go2 Blueprint seam：静态组合中必须存在且仅存在一个满足 `AgentSpec` 的 `StandaloneAgentBridge`，避免 `PerceiveLoopSkill` 因缺少依赖而在连接硬件后启动失败。
 - Go2 locomotion seam：官方模块完成启动后，入口必须对已部署的唯一 `GO2Connection` 通过 `publish_request` 发送一次 API `1027` / `data=true`；响应状态码不为 `0`、响应结构无效或抛出异常必须使启动失败。
 - 输入 Webhook seam：严格请求 schema、持久化后 `202`、稳定 `instruction_id` 幂等与冲突响应。
-- 固定 Agent seam：普通事件按持久化顺序串行处理，系统提示词明确最终输出直接面向用户，20 个包装器 MCP 工具保持激活。
+- 固定 Agent seam：普通事件按持久化顺序串行处理，系统提示词明确最终输出直接面向用户并拒绝 `Bound` 与所有空翻请求，20 个包装器 MCP 工具保持激活。
 - 输出 Webhook seam：完整终态回复、稳定 `reply_id`、失败重投与进程恢复均不得重跑 Agent 或 MCP 工具。
 - 停止快速路径 seam：只匹配规范化后的“停”或 `stop`，绕过 Agent 并单次调用 `stop_all`；底层逐项停止并报告失败组件。
 - Health Webhook seam：上游 golden raw-body HMAC、严格验证顺序、并发原子去重、独立 durable queue、`202 accepted|duplicate` 与固定错误映射。

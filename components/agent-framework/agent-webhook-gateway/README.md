@@ -75,6 +75,7 @@ POST http://127.0.0.1:8080/v1/instructions
 - 新事件和相同文本的幂等重投返回 `202`；同一 ID 对应不同文本返回 `409`。
 - 普通事件按 SQLite 受理顺序串行进入一个固定 Agent 会话。
 - “停”或 `stop` 的精确规范化匹配绕过 Agent，单次调用 `stop_all`。
+- 固定 Agent 明确拒绝 `Bound` 以及任何前空翻、后空翻、侧空翻、连续空翻或其他 `flip` / `somersault` 动作；它不会为这些请求调用 `execute_sport_command` 或其他运动工具，也不会改写成替代动作。
 - 具名目的地使用 `navigate_with_text`；未知区域覆盖探索、已建图覆盖巡逻和非覆盖式人类散步分别使用 `begin_exploration`、`start_patrol`、`start_stroll`。
 - `stop_all` 由底层统一尝试停止定时速度、定点导航、探索、巡逻、散步和持续视觉查找；Agent 和快速路径都不再调用专项停止工具。
 - Agent 或停止调用失败时仍产生普通回复事件，文本固定为“暂时无法完成此请求，请稍后重试。”。
@@ -82,6 +83,8 @@ POST http://127.0.0.1:8080/v1/instructions
 - 进程启动时若发现上次运行中断在 `processing` 状态，会生成固定失败回复而不重跑该事件，避免重复机器狗副作用。
 - Health 通知在独立 SQLite 表和 queue 中按 raw-body digest 原子去重，ACK 后查询权威 Health MCP。
 - Health worker 固定检查 contract、revision、wearer/source、live/test/freshness；通过时只记录 `verified_no_action`，不会调用 Agent 或机器狗 MCP。
+
+`Bound` 与所有空翻的禁用当前属于固定 Agent 的系统提示词约束，不是程序级工具调用门。直接连接 MCP 的其他 Host 仍可调用通用的 `execute_sport_command`；需要确定性禁止时，必须在下层增加可测试的命令策略。
 
 普通 HTTP schema 见 `docs/agent-input-webhook-integration.md`；Health 配置、header、ACK 和错误映射见 `docs/health-mcp-consumer-integration.md`。
 

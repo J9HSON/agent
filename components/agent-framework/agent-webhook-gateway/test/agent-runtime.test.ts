@@ -14,6 +14,17 @@ describe("fixed Pi agent runtime", () => {
 		expect(prompt).toContain("方向默认为向前");
 	});
 
+	it("forbids Bound and every form of flip in the fixed Agent prompt", () => {
+		const prompt = buildAgentSystemPrompt(0.1);
+
+		expect(prompt).toContain("禁止执行 Bound");
+		expect(prompt).toContain("任何空翻动作");
+		expect(prompt).toContain("前空翻、后空翻、侧空翻、连续空翻");
+		expect(prompt).toContain("flip、somersault");
+		expect(prompt).toContain("不得调用 execute_sport_command 或任何其他运动工具");
+		expect(prompt).toContain("不得改写或映射为其他动作");
+	});
+
 	it("registers supported pinned official and custom wrapper MCP tools", () => {
 		const tools = createDogTools({
 			callTool: async () => "accepted",
