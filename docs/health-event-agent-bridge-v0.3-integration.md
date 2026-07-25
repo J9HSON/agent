@@ -20,7 +20,7 @@
 2. `event_type` 是上游拥有的开放字符串，不是下游代码中的封闭枚举。
 3. 每个 Webhook 自带完成本次 Agent 判断所需的信息，不依赖 Health MCP 二次查询。
 4. 具体事件的检测算法、阈值和 `evidence` 内容由 `smart-neckband` 定义。
-5. Agent 侧只依赖通用 envelope，并根据建议能力决定回复和工具调用。
+5. Agent 侧只依赖通用 envelope，并根据建议能力决定 TTS 播报和机器狗工具调用。
 6. 新增事件时，正常情况下只更新上游事件目录和测试样例，不修改网关接口。
 7. HTTP 重投不得导致 Agent 或机器狗动作重复执行。
 
@@ -42,7 +42,7 @@
 
 稳定桥接层由双方共同维护，包含：
 
-- 请求 endpoint 和 HMAC Header；
+- 请求 endpoint 和必需 HTTP Header；
 - 通知 ID、事件 ID、revision 和 transition；
 - wearer、source、时间、severity 和 priority；
 - 通用 `summary`；
@@ -78,7 +78,7 @@ docs/specs/health-event-catalog.md
 ```mermaid
 flowchart LR
     S["smart-neckband event detector"] --> O["durable webhook outbox"]
-    O -->|"signed POST /v1/health-events"| R["pi-hackason Health receiver"]
+    O -->|"POST /v1/health-events"| R["pi-hackason Health receiver"]
     R --> Q["SQLite health queue"]
     R -->|"202 accepted or duplicate"| O
     Q --> B["generic Health -> Agent bridge"]
@@ -86,7 +86,7 @@ flowchart LR
     A -->|"capability mapping"| M["dimos-mcp-wrapper"]
     M --> D["standalone dog MCP"]
     D --> G["Go2 or dry-run"]
-    A --> P["agent.reply.completed callback"]
+    A --> P["TTS MCP speak text"]
 ```
 
 “广播到 Agent”在当前部署中表示投递到唯一固定的 Pi Agent session，不表示向多个 Agent 做 pub/sub fan-out。
@@ -99,19 +99,10 @@ Endpoint 保持不变：
 POST /v1/health-events
 Content-Type: application/json; charset=utf-8
 Content-Length: <1..65536>
-X-Smart-Collar-Key-Id: <key-id>
-X-Smart-Collar-Timestamp: <unix-seconds>
 X-Smart-Collar-Notification-Id: <notification-uuid>
-X-Smart-Collar-Signature: v1=<64-lowercase-hex>
 ```
 
-签名输入保持不变：
-
-```text
-ascii(timestamp) + "." + raw_utf8_request_body
-```
-
-HMAC 算法保持为 HMAC-SHA256。当前 key 和前一个轮换 key 的处理方式保持不变。
+当前黑客松联调入口不执行身份校验、签名校验或时间窗校验，不需要 key、secret、token 或签名。发送端可以继续附带旧鉴权 Header，但 Gateway 会忽略它们。
 
 ## 6. 通用 Webhook envelope
 
@@ -279,15 +270,15 @@ robot.approach_and_greet
 
 本次黑客松明确采用直通模式：
 
-1. Receiver 验证 HTTP、timestamp、HMAC、body schema 和 wearer。
+1. Receiver 验证 HTTP、body schema 和 wearer。
 2. Receiver 原子持久化 notification 和 health queue item。
 3. Receiver 返回 `202 accepted` 或 `202 duplicate`。
 4. Health worker 不调用 Health MCP。
 5. Health worker把 envelope 转换为 Agent 输入。
 6. Agent 生成安慰或提醒文本，并按 capability 选择 MCP 工具。
-7. 最终文本继续通过现有 `agent.reply.completed` 回调交付。
+7. 需要让用户听到内容时，Agent 显式调用独立 TTS MCP 的 `speak(text)`；最终 assistant 文本不会自动交付。
 
-该模式将已签名 Webhook 内容视为 Demo 的事件事实来源。双方必须理解：它降低了联调复杂度，但没有现有 v0.2 “Webhook 唤醒后重新读取权威状态”的一致性保证。
+该模式将无鉴权 Webhook 内容视为 Demo 的事件事实来源。双方必须理解：它降低了联调复杂度，但既没有来源认证，也没有现有 v0.2 “Webhook 唤醒后重新读取权威状态”的一致性保证。
 
 生产化时是否恢复权威状态查询，应另开版本讨论，不在本次联调中混入兼容分支。
 
@@ -317,7 +308,7 @@ return_to_user_and_greet，不得拆分为导航、等待和问候多个调用�
 health:<event_id>:<event_revision>
 ```
 
-该 ID 用于复用现有 Agent FIFO 和 reply outbox 的幂等、回复关联与崩溃恢复能力。
+该 ID 用于复用现有 Agent FIFO 的输入幂等与崩溃恢复能力。TTS MCP 调用不使用该 ID 建立额外输出队列。
 
 ## 10. 数据来源和动作门
 
@@ -345,12 +336,12 @@ or test_mode == true
 
 ### 10.3 Agent 失败
 
-Agent 未产生最终回复、工具调用失败或 MCP 返回错误时：
+Agent 未完成回合、工具调用失败或 MCP 返回错误时：
 
 - 仍完成本次 health instruction；
-- 使用现有通用失败回复；
+- 不生成通用失败语，也不自动调用 TTS；
 - 不自动重跑 Agent；
-- 不自动重试任何机器狗 MCP 工具；
+- 不自动重试任何机器狗 MCP 或 TTS MCP 工具；
 - 保存 event、revision、instruction ID 和 trace ID 的关联。
 
 ## 11. 幂等、排序和重投
@@ -369,7 +360,7 @@ Agent 未产生最终回复、工具调用失败或 MCP 返回错误时：
 3. 相同 event ID、低于或等于已处理 revision：记录 obsolete，不重新运行 Agent。
 4. 相同 event ID、更高 revision：按新 lifecycle revision 处理。
 5. Webhook sender 可以重投 HTTP，但不能通过修改 notification ID 绕过事件幂等。
-6. 回复投递失败只重投同一个 reply，不重新运行 Agent 或 MCP。
+6. TTS MCP 调用失败不由 Gateway 自动重试，也不重新运行 Agent 或机器狗 MCP。
 
 ## 12. 双方职责
 
@@ -381,16 +372,16 @@ Agent 未产生最终回复、工具调用失败或 MCP 返回错误时：
 - 确保 `summary` 和 `evidence` 在不查询 Health MCP 时足以理解事件。
 - 管理 event ID、revision、transition、notification ID 和 sequence。
 - 持久化 Webhook outbox并按 ACK 语义重投。
-- 生成 raw-body HMAC，保持重投 body 字节稳定。
-- 提供 JSON Schema、golden raw body、digest 和 signature。
+- 保持重投 body 字节稳定。
+- 提供 JSON Schema、golden raw body 和 digest。
 - 不发送底层 MCP 工具名、参数或医疗诊断结论。
 
 ### 12.2 `pi-hackason`
 
-- 维护 `/v1/health-events` 接收器、HMAC、持久化和幂等。
+- 维护 `/v1/health-events` 无鉴权接收器、持久化和幂等。
 - 将 `event_type` 和 `evidence` 作为开放数据处理，不写事件枚举 switch。
 - 将所有合法事件转换成固定模板的 Health Agent 输入。
-- 保持一个 Agent session 内的串行语义和 reply outbox。
+- 保持一个 Agent session 内的串行语义，并通过独立 TTS MCP 提供 `speak(text)`。
 - 维护 capability 到本仓行为的映射。
 - 对 `robot.approach_and_greet` 只调用一次 `return_to_user_and_greet`。
 - 阻止 replay、synthetic 或 test event 触发真实机器狗动作。
@@ -400,8 +391,8 @@ Agent 未产生最终回复、工具调用失败或 MCP 返回错误时：
 
 - 固定同一份 v0.3 JSON Schema 和 SHA-256。
 - 固定 golden raw body 的精确 UTF-8 字节。
-- 固定 Header、签名、ACK 和错误映射。
-- 联调前确认 key ID、测试 secret、wearer ID、URL 和时钟。
+- 固定必需 Header、ACK 和错误映射。
+- 联调前确认 wearer ID 和 URL。
 - 共同保存测试证据和差异记录。
 - 对破坏性变更升级 `schema_version`。
 
@@ -459,7 +450,7 @@ components/agent-framework/agent-webhook-gateway/test/health-webhook.test.ts
 1. `pi-hackason` 先上线双版本接收：
    - v0.2 继续按旧逻辑处理，不触发 Agent；
    - v0.3 按本文进入通用 Agent bridge。
-2. 双方用 v0.3 golden payload 完成 HMAC 和 schema 联调。
+2. 双方用 v0.3 golden payload 完成无鉴权 HTTP 和 schema 联调。
 3. `smart-neckband` 将发送端切换为 v0.3。
 4. 观察所有目标事件都已使用 v0.3，且没有 v0.2 重投积压。
 5. 黑客松结束后再决定是否删除 v0.2 接收兼容。
@@ -472,15 +463,11 @@ components/agent-framework/agent-webhook-gateway/test/health-webhook.test.ts
 | --- | --- |
 | Gateway URL | `http://<gateway-host>:8080/v1/health-events` |
 | wearer ID | 双方联调前填写 |
-| current key ID | 双方联调前填写 |
-| secret | 只通过安全通道临时共享，不写入文档或日志 |
 | schema version | `0.3.0` |
 | contract SHA-256 | 生成后填写 |
 | smart-neckband commit | 联调时填写 |
 | pi-hackason commit | 联调时填写 |
 | robot mode | 首轮必须为 dry-run 或替身 |
-
-双方机器时钟必须同步到 300 秒验签窗口内。
 
 ## 17. 联调用例
 
@@ -489,17 +476,17 @@ components/agent-framework/agent-webhook-gateway/test/health-webhook.test.ts
 | GEN-001 | 合法 `cardio.high_hr_while_sedentary/opened` | `202 accepted`，生成一次 Agent 输入。 |
 | GEN-002 | 同 notification ID、同 raw body 重投 | `202 duplicate`，Agent 和 MCP 计数不增加。 |
 | GEN-003 | 同 notification ID、不同 raw body | `409 notification_id_conflict`。 |
-| GEN-004 | 错误 HMAC | `401 invalid_signature`，不持久化、不运行 Agent。 |
-| GEN-005 | 过期 timestamp | `401 timestamp_out_of_range`，不运行 Agent。 |
+| GEN-004 | 不发送任何鉴权 Header | `202 accepted`，正常持久化并运行一次 Agent。 |
+| GEN-005 | 附带无效旧 key/timestamp/signature Header | Header 被忽略，仍按 body 和 notification ID 正常处理。 |
 | GEN-006 | 新增一个下游从未见过的 `event_type` | 不改 Gateway 代码即可 `202 accepted` 并原样进入 Agent。 |
 | GEN-007 | `evidence` 增加未知字段 | 不改 Gateway 代码即可原样进入 Agent。 |
-| GEN-008 | `opened` 含 `agent.comfort_user` | 最终回复包含平静、非诊断性的用户提示。 |
+| GEN-008 | `opened` 含 `agent.comfort_user` | `speak` 恰好调用一次，文本为平静、非诊断性的用户提示。 |
 | GEN-009 | live opened 含 `robot.approach_and_greet` | `return_to_user_and_greet({})` 恰好调用一次。 |
 | GEN-010 | duplicate 或 obsolete revision | 不重复运行 Agent，不重复调用 MCP。 |
 | GEN-011 | `resolved` 无 robot capability | 可产生恢复信息，不调用机器狗 MCP。 |
 | GEN-012 | replay、synthetic 或 `test_mode=true` | 可完成链路演示，但真实机器狗调用计数为 0。 |
-| GEN-013 | Agent 失败 | 产生通用失败回复，不重跑 Agent 或 MCP。 |
-| GEN-014 | 回复 callback 首次失败 | 只重投同一 reply，不重复 Agent 或 MCP。 |
+| GEN-013 | Agent 失败 | 不调用 `speak`，不重跑 Agent 或 MCP。 |
+| GEN-014 | TTS MCP 调用失败 | 不自动重试 `speak`，不重复 Agent 或机器狗 MCP。 |
 | GEN-015 | 五路并发发送同一 notification | 恰好一个 accepted，其余 duplicate。 |
 | GEN-016 | 两种不同领域事件使用同一 endpoint | 均通过同一 envelope 到达 Agent，无事件专用接口。 |
 
@@ -512,17 +499,17 @@ GEN-006、GEN-007 和 GEN-016 是“通用设计成立”的核心验收项，�
 - 用例 ID；
 - 双方 commit hash；
 - contract SHA-256；
-- sanitized request headers；
+- request headers；
 - raw body SHA-256 和 byte length；
 - HTTP status 和 response body；
 - notification ID、event ID、revision、instruction ID 和 trace ID；
 - Agent 运行次数；
 - MCP 工具名、参数和调用次数；
-- reply ID、回复文本和 callback 次数；
+- TTS MCP 工具名、`text` 参数、结果和调用次数；
 - 是否使用 dry-run、替身或真实 Go2；
 - 开始时间、结束时间和双方执行人。
 
-不得保存 secret、完整 HMAC key、模型凭据或原始 ECG 数据。
+不得保存模型凭据或原始 ECG 数据。
 
 ## 19. 差异登记
 
@@ -530,7 +517,7 @@ GEN-006、GEN-007 和 GEN-016 是“通用设计成立”的核心验收项，�
 | --- | --- | --- | --- | --- | --- | --- |
 | GAP-001 |  |  |  |  |  | Open |
 
-任何一方发现 schema、签名、幂等、事件生命周期或 capability 语义不一致时，先登记差异，不得只在本地加兼容分支隐藏问题。
+任何一方发现 schema、幂等、事件生命周期或 capability 语义不一致时，先登记差异，不得只在本地加兼容分支隐藏问题。
 
 ## 20. 双方确认
 
@@ -570,7 +557,7 @@ Commit：
 2. 双方 commit hash 已记录。
 3. GEN-001 至 GEN-016 全部通过，或明确登记并共同接受未通过项。
 4. 未知事件和未知 evidence 字段无需修改 Gateway 即可到达 Agent。
-5. duplicate、obsolete revision 和 callback retry 均不重复运行 Agent 或 MCP。
+5. duplicate、obsolete revision 和 TTS MCP 失败均不重复运行 Agent、机器狗 MCP 或 `speak`。
 6. Test/replay/synthetic 不触发真实机器人动作。
 7. live Demo 中 `robot.approach_and_greet` 恰好映射为一次 `return_to_user_and_greet({})`。
 8. 所有 blocker 已关闭。

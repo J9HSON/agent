@@ -62,12 +62,31 @@ if (!existsSync(envPath)) {
 	failures.push(`${envPath} is missing; copy .env.example and configure it`);
 } else {
 	process.loadEnvFile(envPath);
-	const replyUrl = process.env.AGENT_WEBHOOK_REPLY_URL;
-	try {
-		const parsed = new URL(replyUrl ?? "");
-		requireCondition(parsed.protocol === "http:" || parsed.protocol === "https:", "AGENT_WEBHOOK_REPLY_URL must use HTTP(S)");
-	} catch {
-		failures.push("AGENT_WEBHOOK_REPLY_URL must be an absolute HTTP(S) URL");
+	const ttsMcpUrl = process.env.AGENT_WEBHOOK_TTS_MCP_URL?.trim();
+	if (ttsMcpUrl) {
+		let parsedTtsMcpUrl;
+		try {
+			parsedTtsMcpUrl = new URL(ttsMcpUrl);
+			requireCondition(
+				parsedTtsMcpUrl.protocol === "http:" || parsedTtsMcpUrl.protocol === "https:",
+				"AGENT_WEBHOOK_TTS_MCP_URL must use HTTP(S)",
+			);
+		} catch {
+			failures.push("AGENT_WEBHOOK_TTS_MCP_URL must be an absolute HTTP(S) URL");
+		}
+		if (parsedTtsMcpUrl) {
+			try {
+				const robotMcpUrl = new URL(
+					process.env.AGENT_WEBHOOK_MCP_URL?.trim() || "http://127.0.0.1:9991/mcp",
+				);
+				requireCondition(
+					parsedTtsMcpUrl.toString() !== robotMcpUrl.toString(),
+					"AGENT_WEBHOOK_TTS_MCP_URL must differ from AGENT_WEBHOOK_MCP_URL",
+				);
+			} catch {
+				failures.push("AGENT_WEBHOOK_MCP_URL must be an absolute HTTP(S) URL");
+			}
+		}
 	}
 }
 

@@ -3,7 +3,7 @@
 	"version": "0.1.0",
 	"private": true,
 	"type": "module",
-	"description": "Persistent webhook inbox and outbox for a fixed Pi agent session",
+	"description": "Persistent webhook inbox with robot and TTS MCP tools for a fixed Pi agent session",
 	"bin": {
 		"agent-webhook-gateway": "./dist/cli.js"
 	},

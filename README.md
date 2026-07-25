@@ -37,7 +37,7 @@ To learn more about Pi:
 | Component | Description |
 | --- | --- |
 | **[dimos-mcp](components/dimos-mcp)** | Standalone machine-side HTTP MCP for dry-run or Unitree Go2 motion. |
-| **[agent-framework](components/agent-framework)** | Upper-machine Agent integration containing the forwarding MCP, lifecycle hooks, persistent input gateway, and final-reply delivery. |
+| **[agent-framework](components/agent-framework)** | Upper-machine Agent integration containing the forwarding MCP, lifecycle hooks, persistent input gateway, and optional TTS MCP tool. |
 
 For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
 

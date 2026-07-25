@@ -6,13 +6,13 @@ import { HealthNotificationService } from "./health-service.ts";
 import { HealthWebhookReceiver } from "./health-webhook.ts";
 import { createInstructionServer } from "./http-server.ts";
 import { HttpMcpToolClient } from "./mcp-client.ts";
-import { ReplyWebhookClient } from "./reply-client.ts";
 import { AgentWebhookService } from "./service.ts";
 import { GatewayStore } from "./store.ts";
 
 async function main(): Promise<void> {
 	const config = readGatewayConfig();
 	const mcp = new HttpMcpToolClient(config.mcpWrapperUrl, config.mcpTimeoutMs);
+	const ttsMcp = config.ttsMcpUrl ? new HttpMcpToolClient(config.ttsMcpUrl, config.ttsMcpTimeoutMs) : undefined;
 	const store = new GatewayStore(config.databasePath);
 	const agent = await PiUserTextAgent.create({
 		cwd: config.agentCwd,
@@ -20,14 +20,12 @@ async function main(): Promise<void> {
 		sessionDir: config.sessionDir,
 		defaultSpeedMps: config.defaultSpeedMps,
 		mcp,
+		ttsMcp,
 	});
 	const service = new AgentWebhookService({
 		store,
 		agent,
 		mcp,
-		replyClient: new ReplyWebhookClient(config.replyWebhookUrl, config.replyTimeoutMs),
-		retryBaseMs: config.retryBaseMs,
-		retryMaxMs: config.retryMaxMs,
 	});
 	let healthService: HealthNotificationService | undefined;
 	let healthReceiver: HealthWebhookReceiver | undefined;
@@ -45,7 +43,6 @@ async function main(): Promise<void> {
 		healthReceiver = new HealthWebhookReceiver({
 			store,
 			healthService,
-			keys: config.health.keys,
 		});
 		healthService.start();
 	}

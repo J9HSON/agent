@@ -1,17 +1,10 @@
 import { mkdtempSync, rmSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-	AgentWebhookService,
-	createInstructionServer,
-	GatewayStore,
-	isStopPhrase,
-	type McpToolCaller,
-	ReplyWebhookClient,
-	type UserTextAgent,
-} from "../src/index.ts";
+import { AgentWebhookService, createInstructionServer, GatewayStore, isStopPhrase } from "../src/index.ts";
 
 const servers: Server[] = [];
 const directories: string[] = [];
@@ -53,7 +46,28 @@ async function waitFor(check: () => boolean): Promise<void> {
 	}
 }
 
-describe("Agent input and final reply webhook", () => {
+function readInstructionState(
+	databasePath: string,
+	instructionId: string,
+): {
+	status: string;
+	outboxExists: boolean;
+} {
+	const database = new DatabaseSync(databasePath);
+	try {
+		const row = database.prepare("SELECT status FROM instructions WHERE instruction_id = ?").get(instructionId) as {
+			status: string;
+		};
+		const outbox =
+			database.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'outbox'").get() !==
+			undefined;
+		return { status: row.status, outboxExists: outbox };
+	} finally {
+		database.close();
+	}
+}
+
+describe("Agent input webhook", () => {
 	it("matches only the documented normalized stop phrases", () => {
 		for (const text of ["停", "停。", " STOP ", "stop!"]) {
 			expect(isStopPhrase(text), text).toBe(true);
@@ -63,139 +77,64 @@ describe("Agent input and final reply webhook", () => {
 		}
 	});
 
-	it("accepts a persisted instruction before delivering one complete agent reply", async () => {
-		const replies: unknown[] = [];
-		const callbackUrl = await listen(
-			createServer((request, response) => {
-				let body = "";
-				request.setEncoding("utf8");
-				request.on("data", (chunk: string) => {
-					body += chunk;
-				});
-				request.on("end", () => {
-					replies.push(JSON.parse(body));
-					response.writeHead(204).end();
-				});
-			}),
-		);
+	it("persists and completes one Agent instruction without creating a reply outbox", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "agent-webhook-gateway-"));
 		directories.push(directory);
-		const agent: UserTextAgent = {
-			run: async () => "我已经处理完成。",
-		};
-		const mcp: McpToolCaller = {
-			callTool: async () => {
-				throw new Error("MCP should not be called by this instruction");
-			},
-		};
-		const store = new GatewayStore(join(directory, "gateway.sqlite"));
-		const service = new AgentWebhookService({
-			store,
-			agent,
-			mcp,
-			replyClient: new ReplyWebhookClient(callbackUrl, 1_000),
-		});
-		service.start();
-		const gatewayUrl = await listen(createInstructionServer(service));
-
-		const response = await fetch(`${gatewayUrl}/v1/instructions`, {
-			method: "POST",
-			headers: { "content-type": "application/json; charset=utf-8" },
-			body: JSON.stringify({
-				instruction_id: "instruction-1",
-				text: "你好",
-			}),
-		});
-
-		expect(response.status).toBe(202);
-		expect(await response.json()).toEqual({
-			instruction_id: "instruction-1",
-			status: "accepted",
-		});
-		await waitFor(() => replies.length === 1);
-		expect(replies).toEqual([
-			{
-				event: "agent.reply.completed",
-				reply_id: expect.any(String),
-				instruction_id: "instruction-1",
-				text: "我已经处理完成。",
-				completed_at: expect.stringMatching(/Z$/),
-			},
-		]);
-
-		await service.close();
-	});
-
-	it("logs the accepted instruction, Agent processing, final reply, and callback delivery", async () => {
+		const databasePath = join(directory, "gateway.sqlite");
 		const logs: string[] = [];
-		const log = (line: string) => logs.push(line);
-		const directory = mkdtempSync(join(tmpdir(), "agent-webhook-gateway-"));
-		directories.push(directory);
 		const service = new AgentWebhookService({
-			store: new GatewayStore(join(directory, "gateway.sqlite")),
-			agent: { run: async () => "日志中的最终回复" },
-			mcp: { callTool: async () => "unused" },
-			replyClient: { deliver: async () => {} },
-			onLog: log,
+			store: new GatewayStore(databasePath),
+			agent: { run: async () => "internal final text" },
+			mcp: {
+				callTool: async () => {
+					throw new Error("MCP should not be called by this instruction");
+				},
+			},
+			onLog: (line) => logs.push(line),
 		});
 		try {
 			service.start();
-			const gatewayUrl = await listen(createInstructionServer(service, undefined, log));
-
+			const gatewayUrl = await listen(createInstructionServer(service));
 			const response = await fetch(`${gatewayUrl}/v1/instructions`, {
 				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ instruction_id: "logged-instruction", text: "记录这条消息" }),
+				headers: { "content-type": "application/json; charset=utf-8" },
+				body: JSON.stringify({
+					instruction_id: "instruction-1",
+					text: "你好",
+				}),
 			});
-			expect(response.status).toBe(202);
-			await waitFor(() => logs.some((line) => line.includes("reply.delivered")));
 
-			const entries = logs.map((line) => {
-				const match = /^\[agent-webhook\] \S+Z (\S+) (.+)$/u.exec(line);
-				if (!match) {
-					throw new Error(`Unexpected gateway log line: ${line}`);
-				}
-				return {
-					event: match[1],
-					details: JSON.parse(match[2]) as Record<string, unknown>,
-				};
+			expect(response.status).toBe(202);
+			expect(await response.json()).toEqual({
+				instruction_id: "instruction-1",
+				status: "accepted",
 			});
-			expect(entries.map((entry) => entry.event)).toEqual([
-				"instruction.accepted",
-				"instruction.processing",
-				"instruction.completed",
-				"reply.delivery_started",
-				"reply.delivered",
-			]);
-			expect(entries[0]?.details).toEqual({
-				instruction_id: "logged-instruction",
-				kind: "agent",
-				text: "记录这条消息",
-			});
-			expect(entries[2]?.details).toEqual({
-				instruction_id: "logged-instruction",
-				reply_id: expect.any(String),
-				text: "日志中的最终回复",
-			});
+			await waitFor(() => logs.some((line) => line.includes("instruction.completed")));
+			const events = logs.map((line) => /^\[agent-webhook\] \S+Z (\S+) /u.exec(line)?.[1]).filter(Boolean);
+			expect(events).toEqual(["instruction.accepted", "instruction.processing", "instruction.completed"]);
+			expect(logs.join("\n")).not.toContain("reply.");
 		} finally {
 			await service.close();
 		}
+
+		expect(readInstructionState(databasePath, "instruction-1")).toEqual({
+			status: "completed",
+			outboxExists: false,
+		});
 	});
 
-	it("logs rejected instruction requests without echoing the malformed body", async () => {
+	it("logs rejected requests without echoing malformed bodies", async () => {
 		const logs: string[] = [];
-		const log = (line: string) => logs.push(line);
 		const directory = mkdtempSync(join(tmpdir(), "agent-webhook-gateway-"));
 		directories.push(directory);
 		const service = new AgentWebhookService({
 			store: new GatewayStore(join(directory, "gateway.sqlite")),
 			agent: { run: async () => "unused" },
 			mcp: { callTool: async () => "unused" },
-			replyClient: { deliver: async () => {} },
-			onLog: log,
+			onLog: (line) => logs.push(line),
 		});
 		try {
-			const gatewayUrl = await listen(createInstructionServer(service, undefined, log));
+			const gatewayUrl = await listen(createInstructionServer(service, undefined, (line) => logs.push(line)));
 			const malformedBody = "{instruction_id:secret-value}";
 
 			const response = await fetch(`${gatewayUrl}/v1/instructions`, {
@@ -241,7 +180,6 @@ describe("Agent input and final reply webhook", () => {
 		directories.push(directory);
 		const prompts: string[] = [];
 		const logs: string[] = [];
-		const log = (line: string) => logs.push(line);
 		const service = new AgentWebhookService({
 			store: new GatewayStore(join(directory, "gateway.sqlite")),
 			agent: {
@@ -250,17 +188,12 @@ describe("Agent input and final reply webhook", () => {
 					return "完成";
 				},
 			},
-			mcp: {
-				callTool: async () => "unused",
-			},
-			replyClient: {
-				deliver: async () => {},
-			},
-			onLog: log,
+			mcp: { callTool: async () => "unused" },
+			onLog: (line) => logs.push(line),
 		});
 		try {
 			service.start();
-			const gatewayUrl = await listen(createInstructionServer(service, undefined, log));
+			const gatewayUrl = await listen(createInstructionServer(service, undefined, (line) => logs.push(line)));
 			const submit = (text: string) =>
 				fetch(`${gatewayUrl}/v1/instructions`, {
 					method: "POST",
@@ -269,7 +202,12 @@ describe("Agent input and final reply webhook", () => {
 				});
 
 			expect((await submit("向前走")).status).toBe(202);
-			expect((await submit("向前走")).status).toBe(202);
+			const duplicateResponse = await submit("向前走");
+			expect(duplicateResponse.status).toBe(202);
+			expect(await duplicateResponse.json()).toEqual({
+				instruction_id: "stable-id",
+				status: "accepted",
+			});
 			expect((await submit("向后走")).status).toBe(409);
 			await waitFor(() => prompts.length === 1);
 			expect(prompts).toEqual(["向前走"]);
@@ -287,7 +225,7 @@ describe("Agent input and final reply webhook", () => {
 		}
 	});
 
-	it("runs normal instructions through one fixed agent session in persisted order", async () => {
+	it("runs normal instructions through one fixed Agent session in persisted order", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "agent-webhook-gateway-"));
 		directories.push(directory);
 		const prompts: string[] = [];
@@ -307,7 +245,6 @@ describe("Agent input and final reply webhook", () => {
 				},
 			},
 			mcp: { callTool: async () => "unused" },
-			replyClient: { deliver: async () => {} },
 		});
 		service.start();
 		const gatewayUrl = await listen(createInstructionServer(service));
@@ -328,7 +265,7 @@ describe("Agent input and final reply webhook", () => {
 		await service.close();
 	});
 
-	it("bypasses the busy agent for an exact normalized stop phrase", async () => {
+	it("bypasses the busy Agent for an exact normalized stop phrase without automatic speech", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "agent-webhook-gateway-"));
 		directories.push(directory);
 		let releaseAgent: (() => void) | undefined;
@@ -336,13 +273,13 @@ describe("Agent input and final reply webhook", () => {
 			releaseAgent = resolve;
 		});
 		const toolCalls: string[] = [];
-		const replies: Array<{ instruction_id: string; text: string }> = [];
+		const logs: string[] = [];
 		const service = new AgentWebhookService({
 			store: new GatewayStore(join(directory, "gateway.sqlite")),
 			agent: {
 				run: async () => {
 					await agentBlocked;
-					return "普通回复";
+					return "普通内部结果";
 				},
 			},
 			mcp: {
@@ -351,11 +288,7 @@ describe("Agent input and final reply webhook", () => {
 					return "accepted";
 				},
 			},
-			replyClient: {
-				deliver: async (event) => {
-					replies.push(event);
-				},
-			},
+			onLog: (line) => logs.push(line),
 		});
 		service.start();
 		const gatewayUrl = await listen(createInstructionServer(service));
@@ -370,189 +303,73 @@ describe("Agent input and final reply webhook", () => {
 		await submit("stop", " STOP！ ");
 		await waitFor(() => toolCalls.length === 1);
 		expect(toolCalls).toEqual(["stop_all"]);
-		await waitFor(() => replies.some((reply) => reply.instruction_id === "stop"));
-		expect(replies.find((reply) => reply.instruction_id === "stop")?.text).toBe("已发送停止指令。");
+		await waitFor(() =>
+			logs.some((line) => line.includes("instruction.completed") && line.includes('"instruction_id":"stop"')),
+		);
+		expect(logs.join("\n")).not.toContain("reply.");
 
 		releaseAgent?.();
 		await service.close();
 	});
 
-	it("uses the fixed failure reply when stop_all is not accepted", async () => {
+	it("marks failed Agent and stop processing complete without creating fallback replies", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "agent-webhook-gateway-"));
 		directories.push(directory);
-		const replies: string[] = [];
+		const databasePath = join(directory, "gateway.sqlite");
 		const logs: string[] = [];
 		const service = new AgentWebhookService({
-			store: new GatewayStore(join(directory, "gateway.sqlite")),
-			agent: { run: async () => "unused" },
-			mcp: {
-				callTool: async () => {
-					throw new Error("upstream stop failed");
-				},
-			},
-			replyClient: {
-				deliver: async (event) => {
-					replies.push(event.text);
-				},
-			},
-			onLog: (line) => logs.push(line),
-		});
-		try {
-			service.start();
-			service.acceptInstruction({ instructionId: "failed-stop", text: "停" });
-			await waitFor(() => replies.length === 1);
-
-			expect(replies).toEqual(["暂时无法完成此请求，请稍后重试。"]);
-			expect(logs.map((line) => /^\[agent-webhook\] \S+Z (\S+) /u.exec(line)?.[1]).filter(Boolean)).toEqual([
-				"instruction.accepted",
-				"instruction.processing",
-				"instruction.stop_failed",
-				"instruction.completed",
-				"reply.delivery_started",
-				"reply.delivered",
-			]);
-			const failureLog = logs.find((line) => line.includes("instruction.stop_failed"));
-			const details = JSON.parse(failureLog?.split(" instruction.stop_failed ")[1] ?? "") as Record<string, unknown>;
-			expect(details).toEqual({
-				instruction_id: "failed-stop",
-				error: "upstream stop failed",
-			});
-		} finally {
-			await service.close();
-		}
-	});
-
-	it("retries the same persisted reply without rerunning the agent", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "agent-webhook-gateway-"));
-		directories.push(directory);
-		let agentRuns = 0;
-		const deliveryIds: string[] = [];
-		const logs: string[] = [];
-		const service = new AgentWebhookService({
-			store: new GatewayStore(join(directory, "gateway.sqlite")),
-			agent: {
-				run: async () => {
-					agentRuns++;
-					return "唯一回复";
-				},
-			},
-			mcp: { callTool: async () => "unused" },
-			replyClient: {
-				deliver: async (event) => {
-					deliveryIds.push(event.reply_id);
-					if (deliveryIds.length === 1) {
-						throw new Error("temporary callback failure");
-					}
-				},
-			},
-			retryBaseMs: 5,
-			retryMaxMs: 5,
-			onLog: (line) => logs.push(line),
-		});
-		try {
-			service.start();
-			const gatewayUrl = await listen(createInstructionServer(service));
-
-			await fetch(`${gatewayUrl}/v1/instructions`, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ instruction_id: "retry", text: "回复我" }),
-			});
-			await waitFor(() => deliveryIds.length === 2);
-
-			expect(new Set(deliveryIds).size).toBe(1);
-			expect(agentRuns).toBe(1);
-			const failureLog = logs.find((line) => line.includes("reply.delivery_failed"));
-			expect(failureLog).toBeDefined();
-			const failureDetails = JSON.parse(failureLog?.split(" reply.delivery_failed ")[1] ?? "") as Record<
-				string,
-				unknown
-			>;
-			expect(failureDetails).toEqual({
-				instruction_id: "retry",
-				reply_id: deliveryIds[0],
-				attempt: 1,
-				retry_in_ms: 5,
-				error: "temporary callback failure",
-			});
-		} finally {
-			await service.close();
-		}
-	});
-
-	it("delivers the fixed user-facing text when the agent cannot complete", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "agent-webhook-gateway-"));
-		directories.push(directory);
-		const replies: string[] = [];
-		const logs: string[] = [];
-		const service = new AgentWebhookService({
-			store: new GatewayStore(join(directory, "gateway.sqlite")),
+			store: new GatewayStore(databasePath),
 			agent: {
 				run: async () => {
 					throw new Error("provider unavailable Authorization: Bearer sk-secret-value token=private-token-value");
 				},
 			},
-			mcp: { callTool: async () => "unused" },
-			replyClient: {
-				deliver: async (event) => {
-					replies.push(event.text);
+			mcp: {
+				callTool: async () => {
+					throw new Error("upstream stop failed");
 				},
 			},
 			onLog: (line) => logs.push(line),
 		});
 		try {
 			service.start();
-			const gatewayUrl = await listen(createInstructionServer(service));
+			service.acceptInstruction({ instructionId: "failed-agent", text: "做一件事" });
+			service.acceptInstruction({ instructionId: "failed-stop", text: "停" });
+			await waitFor(() => logs.filter((line) => line.includes("instruction.completed")).length === 2);
 
-			await fetch(`${gatewayUrl}/v1/instructions`, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ instruction_id: "failed", text: "做一件事" }),
-			});
-			await waitFor(() => replies.length === 1);
-			expect(replies).toEqual(["暂时无法完成此请求，请稍后重试。"]);
-			const failureLog = logs.find((line) => line.includes("instruction.agent_failed"));
-			expect(failureLog).toBeDefined();
-			const details = JSON.parse(failureLog?.split(" instruction.agent_failed ")[1] ?? "") as Record<
-				string,
-				unknown
-			>;
-			expect(details).toEqual({
-				instruction_id: "failed",
-				error: "provider unavailable Authorization: [redacted] token=[redacted]",
-			});
-			expect(failureLog).not.toContain("sk-secret-value");
-			expect(failureLog).not.toContain("private-token-value");
+			expect(logs.some((line) => line.includes("instruction.agent_failed"))).toBe(true);
+			expect(logs.some((line) => line.includes("instruction.stop_failed"))).toBe(true);
+			expect(logs.join("\n")).toContain("Authorization: [redacted]");
+			expect(logs.join("\n")).not.toContain("sk-secret-value");
+			expect(logs.join("\n")).not.toContain("private-token-value");
+			expect(logs.join("\n")).not.toContain("暂时无法完成此请求");
 		} finally {
 			await service.close();
 		}
+
+		expect(readInstructionState(databasePath, "failed-agent")).toEqual({
+			status: "completed",
+			outboxExists: false,
+		});
+		expect(readInstructionState(databasePath, "failed-stop")).toEqual({
+			status: "completed",
+			outboxExists: false,
+		});
 	});
 
-	it("resumes an outbox retry after restart without rerunning the completed instruction", async () => {
+	it("does not rerun an instruction that was processing when the gateway stopped", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "agent-webhook-gateway-"));
 		directories.push(directory);
 		const databasePath = join(directory, "gateway.sqlite");
-		let firstDeliveryAttempts = 0;
-		const firstService = new AgentWebhookService({
-			store: new GatewayStore(databasePath),
-			agent: { run: async () => "已完成" },
-			mcp: { callTool: async () => "unused" },
-			replyClient: {
-				deliver: async () => {
-					firstDeliveryAttempts++;
-					throw new Error("receiver unavailable");
-				},
-			},
-			retryBaseMs: 100,
-			retryMaxMs: 100,
+		const firstStore = new GatewayStore(databasePath);
+		firstStore.acceptInstruction({ instructionId: "interrupted", text: "执行一次" }, false, new Date().toISOString());
+		expect(firstStore.claimNextNormalInstruction()).toEqual({
+			instructionId: "interrupted",
+			text: "执行一次",
 		});
-		firstService.start();
-		firstService.acceptInstruction({ instructionId: "restart-retry", text: "执行一次" });
-		await waitFor(() => firstDeliveryAttempts === 1);
-		await firstService.close();
+		firstStore.close();
 
 		let restartedAgentRuns = 0;
-		const deliveredReplyIds: string[] = [];
 		const secondService = new AgentWebhookService({
 			store: new GatewayStore(databasePath),
 			agent: {
@@ -562,18 +379,14 @@ describe("Agent input and final reply webhook", () => {
 				},
 			},
 			mcp: { callTool: async () => "unused" },
-			replyClient: {
-				deliver: async (event) => {
-					deliveredReplyIds.push(event.reply_id);
-				},
-			},
-			retryBaseMs: 100,
-			retryMaxMs: 100,
 		});
 		secondService.start();
-		await waitFor(() => deliveredReplyIds.length === 1);
+		await secondService.close();
 
 		expect(restartedAgentRuns).toBe(0);
-		await secondService.close();
+		expect(readInstructionState(databasePath, "interrupted")).toEqual({
+			status: "completed",
+			outboxExists: false,
+		});
 	});
 });

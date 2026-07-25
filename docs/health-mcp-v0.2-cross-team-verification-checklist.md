@@ -1,4 +1,4 @@
-# Smart Collar Health MCP v0.2 双方实现核对与联调验收清单
+# 历史归档：Smart Collar Health MCP v0.2 签名契约核对与联调验收清单
 
 > 文档日期：2026-07-24
 >
@@ -10,9 +10,13 @@
 >
 > 上游仓库：`smart-neckband`
 >
-> 文档用途：由 `pi-hackason` 接收消费端和 `smart-neckband` 生产服务端开发共同逐项核对。只有静态契约、双方实现和联合测试全部通过，才能判定 Health MCP v0.2 对接成功。
+> 历史用途：本文保存 2026-07-24 的签名契约、实现快照和旧联合验收计划，仅供追溯，不得作为当前 Gateway 配置、行为或结赛联调验收依据。
 
-## 1. 核对结论定义
+> 结赛联调覆盖（2026-07-26）：当前 Gateway 已完全移除 Health HTTP 鉴权。本文中 HMAC、timestamp、key/secret、签名错误和 key rotation 条目仅保留为原始 v0.2 契约历史，不再是当前 Gateway 配置、运行行为或联调验收项。当前请求不需要任何鉴权 Header；旧鉴权 Header 会被忽略。
+>
+> 除本覆盖说明外，下文所有“当前”“必填”“PI-已验证”、勾选状态、测试预期和放行条件均属于旧实现快照。当前联调只以 `docs/health-mcp-consumer-integration.md`、`USAGE.md` 和现行自动化测试为准。
+
+## 1. 历史核对结论定义（当前不适用）
 
 本文件把结论分为三类：
 
@@ -55,7 +59,7 @@ Get-FileHash -Algorithm SHA256 -LiteralPath "<文件绝对路径>"
 - [ ] 双方确认 `health-mcp-v0.2.contract(1).json` 是可执行机器契约，不以文档示例替代 Schema。
 - [ ] 后续任何字段、枚举、范围或错误分类变更都升级契约版本，并同步机器契约、双方实现和测试向量。
 
-## 3. 双方职责边界
+## 3. 历史双方职责边界（鉴权条目当前不适用）
 
 ### 3.1 `smart-neckband` 负责
 
@@ -86,7 +90,7 @@ Get-FileHash -Algorithm SHA256 -LiteralPath "<文件绝对路径>"
 - 远程 Health MCP transport；P0 默认仅 stdio。
 - 用 Webhook body 直接代替 MCP 权威查询结果。
 
-## 4. 我方实现清单
+## 4. 2026-07-24 旧实现清单（当前不适用）
 
 我方 Health MCP v0.2 消费端实现位于 commit：
 
@@ -128,7 +132,7 @@ feat(agent): add Health MCP v0.2 consumer with signed webhook
 - [x] 未配置 Health 变量时 endpoint 和 MCP 子进程保持关闭。
 - [x] 任意部分 Health 配置或非法 secret 会在启动阶段 fail closed。
 
-## 5. 端到端数据流
+## 5. 历史签名数据流（当前不适用）
 
 ```mermaid
 sequenceDiagram
@@ -167,7 +171,7 @@ sequenceDiagram
 - [ ] 上游 MCP 查询结果来自与事件/状态 writer 一致的权威 Health 状态库。
 - [ ] 双方都不把 Webhook body 当成当前完整状态。
 
-## 6. 我方启动配置
+## 6. 历史鉴权启动配置（当前不适用）
 
 Health 默认关闭。只要存在任意 `AGENT_WEBHOOK_HEALTH_*` 环境变量，就进入 Health 配置校验；必填项缺失或非法时进程在监听端口和启动子进程前失败。
 
@@ -206,7 +210,7 @@ $env:AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON = '["-3.12","-m","smart_neckband.health_
 - [ ] 上游明确 Health DB 路径和 wearer 配置的传递方式。
 - [ ] 上游 stderr 不输出 secret、完整签名、完整 Webhook body 或敏感健康原始数据；我方会把子进程 stderr 转发到自身 stderr。
 
-## 7. Health Webhook HTTP 契约
+## 7. 历史签名 HTTP 契约（当前不适用）
 
 ### 7.1 Endpoint
 
@@ -601,7 +605,7 @@ Node timer 安全上限为 `2147483647 ms`。
 
 当前我方没有为消费队列设置 dead letter 或最大尝试次数。持续的 transport/`retryable=true` 失败会保留并继续重试。若双方希望增加消费端 dead letter，必须作为单独需求冻结，不在本次 v0.2 实现中临时加入。
 
-## 12. 安全与部署约束
+## 12. 历史签名部署约束（鉴权条目当前不适用）
 
 ### 12.1 必须保持
 
@@ -665,7 +669,7 @@ Node timer 安全上限为 `2147483647 ms`。
 - [ ] JSON-RPC error 和 tool execution error 分类与 v0.2 一致。
 - [ ] `retryable` 和 `retry_after_ms` 与错误码表一致。
 
-### 13.4 Webhook sender
+### 13.4 历史签名 Webhook sender（当前不适用）
 
 - [ ] secret 配置只接受 64 位 lowercase hex，解码后恰好 32 bytes。
 - [ ] 签名使用实际发送的 raw body bytes。
@@ -699,9 +703,9 @@ Node timer 安全上限为 `2147483647 ms`。
 
 不要在反馈表中填写 secret。
 
-## 14. 双方联合测试计划
+## 14. 历史双方联合测试计划（鉴权用例当前不适用）
 
-### 14.1 联调环境
+### 14.1 历史联调环境
 
 建议配置：
 
@@ -729,7 +733,7 @@ Node timer 安全上限为 `2147483647 ms`。
 | Health DB 临时路径 |  |
 | Gateway DB 临时路径 |  |
 
-### 14.2 Golden HMAC
+### 14.2 历史 Golden HMAC（当前不适用）
 
 以下 secret 是上游机器契约的公开测试向量，只能用于测试：
 
@@ -752,7 +756,7 @@ v1=217d52203ca73e60f36a9f6c323e34023e22a00d3db74af92522ae6d5c974067
 
 注意：联调真实 HTTP 时 timestamp 必须在接收端当前时间 `±300` 秒内，因此该历史 golden 用于离线算法测试；实时发送时用当前 timestamp 重新计算 HMAC。
 
-### 14.3 联调用例
+### 14.3 历史联调用例（INT-005、INT-006、INT-017 当前不适用）
 
 | ID | 场景 | 操作 | 预期 |
 | --- | --- | --- | --- |
@@ -787,7 +791,7 @@ v1=217d52203ca73e60f36a9f6c323e34023e22a00d3db74af92522ae6d5c974067
 - 进程 kill/restart 用例的时间线。
 - Agent、DIMOS、robot 调用次数为 0 的断言。
 
-## 15. 我方本地验证证据
+## 15. 2026-07-24 旧本地验证证据
 
 环境：
 
@@ -828,7 +832,7 @@ npm.cmd run check
 
 根级 `tsgo` 的这些错误不能被描述为本次功能通过，但也不能被误归因于 Health Gateway。联合验收应以 Gateway 局部检查、专项测试和联合场景证据为主，同时单独跟踪根级类型基线问题。
 
-## 16. 差异登记和双方签字
+## 16. 历史差异登记和双方签字（当前不适用）
 
 ### 16.1 契约差异登记
 
@@ -876,7 +880,7 @@ npm.cmd run check
 最终结论：通过 / 有条件通过 / 不通过
 ```
 
-### 16.4 最终放行规则
+### 16.4 历史最终放行规则（当前不适用）
 
 只有同时满足以下条件才写“对接成功”：
 

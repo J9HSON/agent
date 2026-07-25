@@ -295,7 +295,7 @@ export DIMOS_DOG_MCP_PORT=9990
 dimos-dog-mcp
 ```
 
-Go2 模式复用 DiMOS 官方 `unitree_go2_spatial` Blueprint，并组合官方导航、Unitree 和感知技能。`ModuleCoordinator.build()` 完成所有官方模块启动后，入口同步通过 `GO2Connection.publish_request` 向 `rt/api/sport/request` 发送 API `1027` / `data=true`，避免导航已经产生 `cmd_vel`、但 Go2 固件静默忽略默认 `WIRELESS_CONTROLLER` 帧。响应状态码不为 `0`、结构无效或抛出异常时，进程停止全部模块并失败退出。官方 `SpeakSkill` 不组合：它会在启动阶段初始化 OpenAI TTS，而本项目由上层回复接收端完成最终用户 TTS，因此底层启动不需要 `OPENAI_API_KEY`。官方 `PersonFollowSkillContainer` 也不组合，因为其人员跟随链路要求本项目不支持的 `ALIBABA_API_KEY`；因此 `follow_person` 和 `stop_following` 不会出现在 `tools/list`。自研 `StrollSkill` 复用官方 Frontier 检测与导航，只替换为随机选支、退休旁支、拒绝回头补覆盖的目标策略。
+Go2 模式复用 DiMOS 官方 `unitree_go2_spatial` Blueprint，并组合官方导航、Unitree 和感知技能。`ModuleCoordinator.build()` 完成所有官方模块启动后，入口同步通过 `GO2Connection.publish_request` 向 `rt/api/sport/request` 发送 API `1027` / `data=true`，避免导航已经产生 `cmd_vel`、但 Go2 固件静默忽略默认 `WIRELESS_CONTROLLER` 帧。响应状态码不为 `0`、结构无效或抛出异常时，进程停止全部模块并失败退出。官方 `SpeakSkill` 不组合：它会在启动阶段初始化 OpenAI TTS，而最终用户语音由上层 Agent 显式调用独立 TTS MCP，因此底层启动不需要 `OPENAI_API_KEY`。官方 `PersonFollowSkillContainer` 也不组合，因为其人员跟随链路要求本项目不支持的 `ALIBABA_API_KEY`；因此 `follow_person` 和 `stop_following` 不会出现在 `tools/list`。自研 `StrollSkill` 复用官方 Frontier 检测与导航，只替换为随机选支、退休旁支、拒绝回头补覆盖的目标策略。
 
 `return_to_user_and_greet` 使用预先调用 `tag_location(location_name="用户身边")` 保存的固定地图点，不执行实时人员跟随。它拒绝其他近似标点，最多等待导航 100 秒；只有 `is_goal_reached()` 成功后才静止 1 秒并向官方 `UnitreeSkillContainer` 提交 `Hello`。任一步失败都不会提前问候。
 

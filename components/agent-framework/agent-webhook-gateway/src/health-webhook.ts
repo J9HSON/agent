@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { type HealthWebhookNotification, parseHealthWebhookNotification } from "./health-contract.ts";
 import type { HealthNotificationService } from "./health-service.ts";
@@ -6,36 +6,20 @@ import type { GatewayStore } from "./store.ts";
 
 const HEALTH_WEBHOOK_PATH = "/v1/health-events";
 const MAX_BODY_BYTES = 65_536;
-const TIMESTAMP_PATTERN = /^[1-9][0-9]{0,11}$/u;
-const SIGNATURE_PATTERN = /^v1=([0-9a-f]{64})$/u;
 const CONTENT_TYPE_PATTERN = /^application\/json(?:\s*;\s*charset\s*=\s*utf-8\s*)?$/iu;
 
 export interface HealthWebhookReceiverOptions {
 	store: GatewayStore;
 	healthService: HealthNotificationService;
-	keys: ReadonlyMap<string, Uint8Array>;
-	nowEpochSeconds?: () => number;
 }
 
 export class HealthWebhookReceiver {
 	private readonly store: GatewayStore;
 	private readonly healthService: HealthNotificationService;
-	private readonly keys: ReadonlyMap<string, Uint8Array>;
-	private readonly nowEpochSeconds: () => number;
 
 	constructor(options: HealthWebhookReceiverOptions) {
-		if (options.keys.size === 0) {
-			throw new Error("At least one Health webhook key is required");
-		}
-		for (const [keyId, secret] of options.keys) {
-			if (!keyId || secret.byteLength !== 32) {
-				throw new Error("Health webhook keys require a non-empty key ID and exactly 32 secret bytes");
-			}
-		}
 		this.store = options.store;
 		this.healthService = options.healthService;
-		this.keys = options.keys;
-		this.nowEpochSeconds = options.nowEpochSeconds ?? (() => Math.floor(Date.now() / 1000));
 	}
 
 	async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -83,30 +67,6 @@ export class HealthWebhookReceiver {
 			return;
 		}
 
-		const timestamp = readSingleHeader(request, "x-smart-collar-timestamp");
-		if (!timestamp || !TIMESTAMP_PATTERN.test(timestamp)) {
-			sendJson(response, 401, { error: "timestamp_out_of_range" });
-			return;
-		}
-		const timestampNumber = Number(timestamp);
-		if (
-			!Number.isSafeInteger(timestampNumber) ||
-			timestampNumber < 1 ||
-			timestampNumber > 253_402_300_799 ||
-			Math.abs(this.nowEpochSeconds() - timestampNumber) > 300
-		) {
-			sendJson(response, 401, { error: "timestamp_out_of_range" });
-			return;
-		}
-
-		const keyId = readSingleHeader(request, "x-smart-collar-key-id");
-		const signature = readSingleHeader(request, "x-smart-collar-signature");
-		const secret = keyId ? this.keys.get(keyId) : undefined;
-		if (!secret || !signature || !verifySignature(secret, timestamp, rawBody, signature)) {
-			sendJson(response, 401, { error: "invalid_signature" });
-			return;
-		}
-
 		let notification: HealthWebhookNotification;
 		try {
 			const text = new TextDecoder("utf-8", { fatal: true }).decode(rawBody);
@@ -140,19 +100,6 @@ export class HealthWebhookReceiver {
 			sendJson(response, 503, { error: "internal_error" });
 		}
 	}
-}
-
-function verifySignature(secret: Uint8Array, timestamp: string, rawBody: Buffer, signature: string): boolean {
-	const match = SIGNATURE_PATTERN.exec(signature);
-	if (!match) {
-		return false;
-	}
-	const expected = createHmac("sha256", secret)
-		.update(Buffer.from(`${timestamp}.`, "ascii"))
-		.update(rawBody)
-		.digest();
-	const provided = Buffer.from(match[1], "hex");
-	return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
 async function readRawBody(request: IncomingMessage): Promise<Buffer> {

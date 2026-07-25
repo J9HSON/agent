@@ -1,4 +1,4 @@
-import { deepStrictEqual, equal, match, ok } from "node:assert/strict";
+import { deepStrictEqual, equal } from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
@@ -6,16 +6,14 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createInstructionServer } from "../../src/http-server.ts";
 import { HttpMcpToolClient } from "../../src/mcp-client.ts";
-import { ReplyWebhookClient } from "../../src/reply-client.ts";
 import { AgentWebhookService } from "../../src/service.ts";
 import { GatewayStore } from "../../src/store.ts";
-import type { AgentReplyEvent, UserTextAgent } from "../../src/types.ts";
+import type { UserTextAgent } from "../../src/types.ts";
 
 const MOVE_INSTRUCTION_ID = "dry-run-move";
 const MOVE_INSTRUCTION_TEXT = "以 0.1 米每秒向前移动 0.01 秒";
-const MOVE_REPLY_TEXT = "dry-run 指令已被 MCP 接受。";
+const MOVE_SPEECH_TEXT = "dry-run 指令已被 MCP 接受。";
 const STOP_INSTRUCTION_ID = "dry-run-stop";
-const STOP_REPLY_TEXT = "已发送停止指令。";
 
 interface McpCall {
 	name: string;
@@ -24,9 +22,10 @@ interface McpCall {
 
 export interface DryRunDemoSummary {
 	agentRuns: number;
-	callbackInstructionIds: string[];
 	wrapperToolCalls: string[];
 	dogToolCalls: string[];
+	ttsToolCalls: string[];
+	spokenTexts: string[];
 }
 
 interface Deferred {
@@ -36,8 +35,8 @@ interface Deferred {
 
 function deferred(): Deferred {
 	let resolvePromise: (() => void) | undefined;
-	const promise = new Promise<void>((resolve) => {
-		resolvePromise = resolve;
+	const promise = new Promise<void>((resolvePromiseValue) => {
+		resolvePromise = resolvePromiseValue;
 	});
 	return {
 		promise,
@@ -88,29 +87,6 @@ function parseMcpCall(value: unknown): { id: unknown; call: McpCall } {
 	};
 }
 
-function parseReplyEvent(value: unknown): AgentReplyEvent {
-	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		throw new Error("Reply callback must be a JSON object");
-	}
-	const event = value as Record<string, unknown>;
-	if (
-		event.event !== "agent.reply.completed" ||
-		typeof event.reply_id !== "string" ||
-		typeof event.instruction_id !== "string" ||
-		typeof event.text !== "string" ||
-		typeof event.completed_at !== "string"
-	) {
-		throw new Error("Reply callback does not match agent.reply.completed");
-	}
-	return {
-		event: "agent.reply.completed",
-		reply_id: event.reply_id,
-		instruction_id: event.instruction_id,
-		text: event.text,
-		completed_at: event.completed_at,
-	};
-}
-
 async function listen(server: Server): Promise<string> {
 	await new Promise<void>((resolveListen, reject) => {
 		server.once("error", reject);
@@ -157,7 +133,7 @@ async function submitInstruction(gatewayUrl: string, instructionId: string, text
 	});
 }
 
-function createDogMcpSubstitute(calls: McpCall[]): Server {
+function createMcpSubstitute(calls: McpCall[], resultText: (call: McpCall) => string): Server {
 	return createServer(async (request, response) => {
 		try {
 			equal(request.method, "POST");
@@ -168,12 +144,7 @@ function createDogMcpSubstitute(calls: McpCall[]): Server {
 				jsonrpc: "2.0",
 				id,
 				result: {
-					content: [
-						{
-							type: "text",
-							text: JSON.stringify({ status: "ok", mode: "dry-run", tool: call.name }),
-						},
-					],
+					content: [{ type: "text", text: resultText(call) }],
 				},
 			});
 		} catch (error) {
@@ -212,34 +183,21 @@ function createWrapperSubstitute(upstreamUrl: string, calls: McpCall[]): Server 
 	});
 }
 
-function createReplyReceiver(replies: AgentReplyEvent[]): Server {
-	return createServer(async (request, response) => {
-		try {
-			equal(request.method, "POST");
-			equal(request.url, "/agent-replies");
-			replies.push(parseReplyEvent(await readJson(request)));
-			response.writeHead(204).end();
-		} catch (error) {
-			sendJson(response, 500, {
-				error: error instanceof Error ? error.message : String(error),
-			});
-		}
-	});
-}
-
 export async function runDryRunDemo(): Promise<DryRunDemoSummary> {
 	const directory = mkdtempSync(join(tmpdir(), "pi-dry-run-e2e-"));
 	const servers: Server[] = [];
 	const wrapperCalls: McpCall[] = [];
 	const dogCalls: McpCall[] = [];
-	const replies: AgentReplyEvent[] = [];
+	const ttsCalls: McpCall[] = [];
 	const moveReachedDog = deferred();
 	const releaseAgent = deferred();
 	let service: AgentWebhookService | undefined;
 	let agentRuns = 0;
 
 	try {
-		const dogServer = createDogMcpSubstitute(dogCalls);
+		const dogServer = createMcpSubstitute(dogCalls, (call) =>
+			JSON.stringify({ status: "ok", mode: "dry-run", tool: call.name }),
+		);
 		servers.push(dogServer);
 		const dogUrl = await listen(dogServer);
 
@@ -247,11 +205,12 @@ export async function runDryRunDemo(): Promise<DryRunDemoSummary> {
 		servers.push(wrapperServer);
 		const wrapperUrl = await listen(wrapperServer);
 
-		const replyServer = createReplyReceiver(replies);
-		servers.push(replyServer);
-		const replyUrl = await listen(replyServer);
+		const ttsServer = createMcpSubstitute(ttsCalls, () => JSON.stringify({ status: "queued" }));
+		servers.push(ttsServer);
+		const ttsUrl = await listen(ttsServer);
 
 		const mcp = new HttpMcpToolClient(`${wrapperUrl}/mcp`, 1_000);
+		const ttsMcp = new HttpMcpToolClient(`${ttsUrl}/mcp`, 1_000);
 		const agent: UserTextAgent = {
 			run: async (text) => {
 				agentRuns++;
@@ -259,16 +218,14 @@ export async function runDryRunDemo(): Promise<DryRunDemoSummary> {
 				await mcp.callTool("move_forward", { speed_mps: 0.1, duration_s: 0.01 });
 				moveReachedDog.resolve();
 				await releaseAgent.promise;
-				return MOVE_REPLY_TEXT;
+				await ttsMcp.callTool("speak", { text: MOVE_SPEECH_TEXT });
+				return "internal turn completed";
 			},
 		};
 		service = new AgentWebhookService({
 			store: new GatewayStore(join(directory, "gateway.sqlite")),
 			agent,
 			mcp,
-			replyClient: new ReplyWebhookClient(`${replyUrl}/agent-replies`, 1_000),
-			retryBaseMs: 10,
-			retryMaxMs: 10,
 		});
 		service.start();
 
@@ -279,10 +236,9 @@ export async function runDryRunDemo(): Promise<DryRunDemoSummary> {
 		await submitInstruction(gatewayUrl, MOVE_INSTRUCTION_ID, MOVE_INSTRUCTION_TEXT);
 		await moveReachedDog.promise;
 		await submitInstruction(gatewayUrl, STOP_INSTRUCTION_ID, " STOP！ ");
+		await waitFor(() => dogCalls.find((call) => call.name === "stop_all"));
 
-		const stopReply = await waitFor(() => replies.find((reply) => reply.instruction_id === STOP_INSTRUCTION_ID));
 		equal(agentRuns, 1);
-		equal(stopReply.text, STOP_REPLY_TEXT);
 		deepStrictEqual(
 			wrapperCalls.map((call) => call.name),
 			["move_forward", "stop_all"],
@@ -294,22 +250,18 @@ export async function runDryRunDemo(): Promise<DryRunDemoSummary> {
 		deepStrictEqual(wrapperCalls, dogCalls);
 		deepStrictEqual(wrapperCalls[0]?.arguments, { speed_mps: 0.1, duration_s: 0.01 });
 		deepStrictEqual(wrapperCalls[1]?.arguments, {});
+		equal(ttsCalls.length, 0);
 
 		releaseAgent.resolve();
-		const moveReply = await waitFor(() => replies.find((reply) => reply.instruction_id === MOVE_INSTRUCTION_ID));
-		equal(moveReply.text, MOVE_REPLY_TEXT);
-		equal(replies.length, 2);
-		for (const reply of replies) {
-			equal(reply.event, "agent.reply.completed");
-			ok(reply.reply_id);
-			match(reply.completed_at, /Z$/);
-		}
+		await waitFor(() => ttsCalls[0]);
+		deepStrictEqual(ttsCalls, [{ name: "speak", arguments: { text: MOVE_SPEECH_TEXT } }]);
 
 		return {
 			agentRuns,
-			callbackInstructionIds: replies.map((reply) => reply.instruction_id),
 			wrapperToolCalls: wrapperCalls.map((call) => call.name),
 			dogToolCalls: dogCalls.map((call) => call.name),
+			ttsToolCalls: ttsCalls.map((call) => call.name),
+			spokenTexts: ttsCalls.map((call) => String(call.arguments.text)),
 		};
 	} finally {
 		releaseAgent.resolve();

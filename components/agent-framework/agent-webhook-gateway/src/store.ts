@@ -1,9 +1,8 @@
-import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { HealthWebhookNotification } from "./health-contract.ts";
-import type { AgentReplyEvent, ExternalInstruction } from "./types.ts";
+import type { ExternalInstruction } from "./types.ts";
 
 type InstructionRow = {
 	instruction_id: string;
@@ -11,19 +10,7 @@ type InstructionRow = {
 	is_stop: number;
 };
 
-type OutboxRow = {
-	reply_id: string;
-	instruction_id: string;
-	text: string;
-	completed_at: string;
-	attempts: number;
-};
-
 export type AcceptInstructionResult = "accepted" | "duplicate" | "conflict";
-export interface PendingReply {
-	event: AgentReplyEvent;
-	attempts: number;
-}
 export interface PendingHealthNotification {
 	notificationId: string;
 	rawBody: Buffer;
@@ -49,16 +36,7 @@ export class GatewayStore {
 				status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed')),
 				received_at TEXT NOT NULL
 			);
-				CREATE TABLE IF NOT EXISTS outbox (
-				reply_id TEXT PRIMARY KEY,
-				instruction_id TEXT NOT NULL UNIQUE REFERENCES instructions(instruction_id),
-				text TEXT NOT NULL,
-				completed_at TEXT NOT NULL,
-				attempts INTEGER NOT NULL DEFAULT 0,
-				next_attempt_at_ms INTEGER NOT NULL DEFAULT 0,
-					delivered_at TEXT
-				);
-				CREATE TABLE IF NOT EXISTS health_notifications (
+					CREATE TABLE IF NOT EXISTS health_notifications (
 					notification_id TEXT PRIMARY KEY,
 					notification_sequence INTEGER NOT NULL,
 					event_id TEXT NOT NULL,
@@ -144,81 +122,8 @@ export class GatewayStore {
 		}
 	}
 
-	completeInstruction(instructionId: string, text: string, completedAt: string): AgentReplyEvent {
-		this.database.exec("BEGIN IMMEDIATE");
-		try {
-			const existing = this.database
-				.prepare(
-					`SELECT reply_id, instruction_id, text, completed_at, attempts
-					 FROM outbox
-					 WHERE instruction_id = ?`,
-				)
-				.get(instructionId) as OutboxRow | undefined;
-			if (existing) {
-				this.database.exec("COMMIT");
-				return this.toReplyEvent(existing);
-			}
-
-			const replyId = randomUUID();
-			this.database
-				.prepare(
-					`INSERT INTO outbox (reply_id, instruction_id, text, completed_at)
-					 VALUES (?, ?, ?, ?)`,
-				)
-				.run(replyId, instructionId, text, completedAt);
-			this.database
-				.prepare("UPDATE instructions SET status = 'completed' WHERE instruction_id = ?")
-				.run(instructionId);
-			this.database.exec("COMMIT");
-			return {
-				event: "agent.reply.completed",
-				reply_id: replyId,
-				instruction_id: instructionId,
-				text,
-				completed_at: completedAt,
-			};
-		} catch (error) {
-			this.database.exec("ROLLBACK");
-			throw error;
-		}
-	}
-
-	nextDueReply(nowMs: number): PendingReply | undefined {
-		const row = this.database
-			.prepare(
-				`SELECT reply_id, instruction_id, text, completed_at, attempts
-				 FROM outbox
-				 WHERE delivered_at IS NULL AND next_attempt_at_ms <= ?
-				 ORDER BY completed_at, reply_id
-				 LIMIT 1`,
-			)
-			.get(nowMs) as OutboxRow | undefined;
-		return row ? { event: this.toReplyEvent(row), attempts: row.attempts } : undefined;
-	}
-
-	nextUndeliveredAttemptAtMs(): number | undefined {
-		const row = this.database
-			.prepare(
-				`SELECT MIN(next_attempt_at_ms) AS next_attempt_at_ms
-				 FROM outbox
-				 WHERE delivered_at IS NULL`,
-			)
-			.get() as { next_attempt_at_ms: number | null };
-		return row.next_attempt_at_ms ?? undefined;
-	}
-
-	markReplyDelivered(replyId: string, deliveredAt: string): void {
-		this.database.prepare("UPDATE outbox SET delivered_at = ? WHERE reply_id = ?").run(deliveredAt, replyId);
-	}
-
-	markReplyFailed(replyId: string, nextAttemptAtMs: number): void {
-		this.database
-			.prepare(
-				`UPDATE outbox
-				 SET attempts = attempts + 1, next_attempt_at_ms = ?
-				 WHERE reply_id = ? AND delivered_at IS NULL`,
-			)
-			.run(nextAttemptAtMs, replyId);
+	completeInstruction(instructionId: string): void {
+		this.database.prepare("UPDATE instructions SET status = 'completed' WHERE instruction_id = ?").run(instructionId);
 	}
 
 	hasPendingNormalInstruction(): boolean {
@@ -237,13 +142,8 @@ export class GatewayStore {
 		);
 	}
 
-	recoverInterrupted(completedAt: string, fallbackText: string): void {
-		const rows = this.database
-			.prepare("SELECT instruction_id FROM instructions WHERE status = 'processing' ORDER BY sequence")
-			.all() as Array<{ instruction_id: string }>;
-		for (const row of rows) {
-			this.completeInstruction(row.instruction_id, fallbackText, completedAt);
-		}
+	recoverInterrupted(): void {
+		this.database.prepare("UPDATE instructions SET status = 'completed' WHERE status = 'processing'").run();
 	}
 
 	acceptHealthNotification(
@@ -400,15 +300,5 @@ export class GatewayStore {
 
 	close(): void {
 		this.database.close();
-	}
-
-	private toReplyEvent(row: OutboxRow): AgentReplyEvent {
-		return {
-			event: "agent.reply.completed",
-			reply_id: row.reply_id,
-			instruction_id: row.instruction_id,
-			text: row.text,
-			completed_at: row.completed_at,
-		};
 	}
 }

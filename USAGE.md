@@ -4,9 +4,9 @@
 
 开始使用前，先阅读根目录的 [CONTEXT.md](CONTEXT.md)。它定义了安全边界和不可违反的架构约束；本文件定义安装、接入和开发流程。
 
-输入端系统向 Agent 输入用户文本、并由回复接收端接收最终回复时，遵循 [Agent 输入与最终回复 Webhook 对接指南](docs/agent-input-webhook-integration.md)。输入端负责确认每个 Webhook 都是完整真实请求；本框架不处理麦克风或语音识别。`components/agent-framework/agent-webhook-gateway` 已实现持久化输入网关、固定 Pi Agent 会话和输出投递器：Agent 无法完成时返回固定的用户可见文本，便于回复接收端直接显示或 TTS 朗读；系统提示词要求模型对参数不明确的运动请求追问，并支持“速度加时长”“距离加时长”或仅说距离，方向可选且默认向前，其中距离仅按部署标定速度进行估算。固定 Agent 还必须明确拒绝 `Bound` 以及任何前空翻、后空翻、侧空翻、连续空翻或其他 `flip` / `somersault` 动作，不得调用 `execute_sport_command` 或其他运动工具，也不得改写成替代动作。Agent 可调用锁定版 DiMOS 的 14 个非停止官方 MCP 工具及 7 个自研工具。官方 `speak`、人员跟随及各专项停止工具不在公开契约中：最终用户语音由回复接收端负责，底层不需要 OpenAI TTS 凭据；人员跟随要求本项目不支持的 `ALIBABA_API_KEY`；停止统一使用 `stop_all`。该自然语言语义和禁止动作目前都没有程序级策略门，不能当作确定性安全保证；直接连接 MCP 的其他 Host 仍可调用通用的 `execute_sport_command`。规范化后精确等于“停”或 `stop` 的语音停止口令会由代码绕过 Agent 并直接触发 `stop_all`，被 MCP 接受后返回“已发送停止指令。”。`stop_all` 会尝试停止定时速度、定点导航、探索、巡逻、散步和持续视觉查找，但仍不等同于物理急停。不要把 MCP 端点当作文本输入端点。
+输入端系统通过 [Agent 输入 Webhook 与 TTS MCP 对接指南](docs/agent-input-webhook-integration.md) 向固定 Agent 提交完整用户文本；本框架不处理麦克风或语音识别。`components/agent-framework/agent-webhook-gateway` 持久化输入并串行运行固定 Pi Agent 会话，不再提供出站回复 Webhook。硬件需要语音时，配置独立 TTS MCP，模型会主动调用 `speak(text)`；最终 assistant 文本只用于结束内部回合，不会自动发送。系统提示词要求模型对参数不明确的运动请求追问，并支持“速度加时长”“距离加时长”或仅说距离，方向可选且默认向前。固定 Agent 还拒绝 `Bound` 和所有空翻请求。Agent 可调用锁定版 DiMOS 的 14 个非停止官方 MCP 工具、7 个自研工具，以及可选的独立 TTS `speak`；后者不属于机器狗 MCP 的 21 工具契约。规范化后精确等于“停”或 `stop` 的口令绕过 Agent 并直接触发 `stop_all`，不会自动播报。`stop_all` 仍不等同于物理急停。
 
-智能项圈 Health MCP v0.2 使用同一 Gateway 进程中的独立验签入口和 durable health queue，详见 [Health MCP v0.2 消费端对接指南](docs/health-mcp-consumer-integration.md)。健康通知不会进入 Agent，也不会触发机器狗动作；项圈采集、事件生成和 Health MCP Server 仍由上游 `smart-neckband` 仓库负责。
+智能项圈 Health MCP v0.2 使用同一 Gateway 进程中的独立无鉴权入口和 durable health queue，详见 [Health MCP v0.2 消费端对接指南](docs/health-mcp-consumer-integration.md)。健康通知不会进入 Agent，也不会触发机器狗动作；项圈采集、事件生成和 Health MCP Server 仍由上游 `smart-neckband` 仓库负责。
 
 ## 架构与职责
 
@@ -19,15 +19,15 @@ flowchart LR
     C -->|默认| R["dry-run"]
     C -->|显式启用| G["Unitree Go2"]
     W -. 生命周期事件 .-> K["可选 hook"]
-    A -->|最终回复 Webhook| O["回复接收端"]
-    H["智能项圈"] -->|"signed /v1/health-events"| A
+    A -->|"speak(text)"| O["独立 TTS MCP 与扬声器"]
+    H["智能项圈"] -->|"POST /v1/health-events"| A
     A -->|"stdio read-only Health MCP"| M["smart-neckband Health MCP"]
 ~~~
 
 | 层级 | 组件 | 使用者应负责的事项 |
 | --- | --- | --- |
 | 上层 | MCP Host / Agent | 需要 hook 或 Agent Gateway 时连接包装器；独立 MCP Host 也可直接连接底层。 |
-| Agent Webhook 层 | `components/agent-framework/agent-webhook-gateway` | 持久化用户文本、串行运行固定 Agent 会话并投递最终回复；在独立队列中验签和消费 Health 通知。 |
+| Agent Webhook 层 | `components/agent-framework/agent-webhook-gateway` | 持久化用户文本、串行运行固定 Agent 会话并按模型决策调用独立 TTS MCP；在独立队列中校验和消费 Health 通知。 |
 | 转发层 | `components/agent-framework/dimos-mcp-wrapper` | 原样、单次转发工具调用；可发出非阻塞 hook 事件。 |
 | 下层 | `components/dimos-mcp` | 部署在机器狗侧主机，公开 14 个受支持的 DiMOS `0.0.14b1` 官方工具与 7 个自研工具；Go2 模式组合官方空间、导航和机器人技能及自研导航扩展，但不运行模型、Agent 循环、云端 TTS 或人员跟随。 |
 | 硬件层 | DIMOS 连接与导航模块 | dry-run 只模拟定时运动；显式 Go2 模式消费传感器与 `cmd_vel` 并执行官方导航。 |
@@ -45,7 +45,7 @@ Agent Webhook Gateway 不应直接连接底层机器狗 MCP，否则会绕过包
 - 默认运行模式是 dry-run：不会连接、站立或移动真实机器狗。
 - 启用真实 Go2 前，必须完成场地隔离、独立急停、低延迟网络和厂商/DIMOS 网络预检。
 - Go2 模式会在官方连接、站立与平衡初始化完成后显式启用固件 joystick 输入。锁定版 DiMOS wheel 未公开 `switch_joystick` RPC，因此入口通过现有 `GO2Connection.publish_request` 向 Sport endpoint 发送 API `1027` / `data=true`。响应状态码不为 `0`、结构无效或调用抛出异常时，下层进程停止全部模块并启动失败；dry-run 不执行该调用。
-- 当前机器狗 MCP 服务没有内建访问控制。不要把 `:9990/mcp` 或 `:9991/mcp` 暴露到不受信任网络；跨主机部署时应由可信网络和外部访问控制保护。普通 instruction/reply Webhook 同样没有认证。Health Webhook 具有独立 raw-body HMAC 和时间戳校验，但非 loopback 部署仍必须使用 TLS、主机防火墙和 secret 轮换。
+- 当前机器狗 MCP、TTS MCP、instruction Webhook 和 Health Webhook 都没有内建访问控制。不要把这些端点暴露到不受信任网络；跨主机部署必须使用可信网络、主机防火墙和 TLS 终止保护。
 
 ## 接入下层机器狗
 
@@ -145,7 +145,7 @@ uv pip install --reinstall --no-deps "onnxruntime-gpu==1.26.0"
 dimos-dog-mcp
 ~~~
 
-Go2 模式组合 DiMOS 官方 `unitree_go2_spatial` Blueprint、`NavigationSkillContainer` 和 `UnitreeSkillContainer`，其中包括 `GO2Connection`、感知、体素地图、代价地图、`ReplanningAStarPlanner`、`WavefrontFrontierExplorer`、`PatrollingModule` 与 `MovementManager`；本项目额外组合 `DogMotionSkill`、`HomeNavigationSkill`、`ReturnToUserAndGreetSkill`、`StrollSkill` 和无模型的 `StandaloneAgentBridge`。`ModuleCoordinator.build()` 返回并证明官方模块已经完成启动后，入口会同步通过 `GO2Connection.publish_request` 向 `rt/api/sport/request` 发送 `{\"api_id\":1027,\"parameter\":{\"data\":true}}`，从而启用默认 `WIRELESS_CONTROLLER` 路径实际消费导航和定时运动产生的 `cmd_vel`。响应状态码不为 `0`、结构无效或调用抛出异常时，入口停止 coordinator 并让进程失败退出；只有成功后才打印 MCP listening 消息并进入主循环。该成功响应不是独立的底盘运动证明，仍须用 `/cmd_vel` 与 `/odom` 联动完成真机验收。官方 `SpeakSkill` 被明确排除，因为它在启动阶段初始化 OpenAI TTS，而最终用户语音由上层回复接收端处理。官方 `PersonFollowSkillContainer` 同样被明确排除，因为它要求本项目不支持的 `ALIBABA_API_KEY`；因此上下层都不会发现或调用人员跟随工具。桥接器只满足官方 `PerceiveLoopSkill` 的回调依赖：视觉命中的可选 `then` 会向当前进程的 `127.0.0.1:<DIMOS_DOG_MCP_PORT>/mcp` 发送一次公开工具调用。它不会创建模型、会话或第二个 Agent 循环。不要将任何其他设备伪装为 Go2。
+Go2 模式组合 DiMOS 官方 `unitree_go2_spatial` Blueprint、`NavigationSkillContainer` 和 `UnitreeSkillContainer`，其中包括 `GO2Connection`、感知、体素地图、代价地图、`ReplanningAStarPlanner`、`WavefrontFrontierExplorer`、`PatrollingModule` 与 `MovementManager`；本项目额外组合 `DogMotionSkill`、`HomeNavigationSkill`、`ReturnToUserAndGreetSkill`、`StrollSkill` 和无模型的 `StandaloneAgentBridge`。`ModuleCoordinator.build()` 返回并证明官方模块已经完成启动后，入口会同步通过 `GO2Connection.publish_request` 向 `rt/api/sport/request` 发送 `{\"api_id\":1027,\"parameter\":{\"data\":true}}`，从而启用默认 `WIRELESS_CONTROLLER` 路径实际消费导航和定时运动产生的 `cmd_vel`。响应状态码不为 `0`、结构无效或调用抛出异常时，入口停止 coordinator 并让进程失败退出；只有成功后才打印 MCP listening 消息并进入主循环。该成功响应不是独立的底盘运动证明，仍须用 `/cmd_vel` 与 `/odom` 联动完成真机验收。官方 `SpeakSkill` 被明确排除，因为它会在底层启动阶段初始化 OpenAI TTS；用户语音改由上层 Agent 显式调用独立 TTS MCP 的 `speak(text)`。官方 `PersonFollowSkillContainer` 同样被明确排除，因为它要求本项目不支持的 `ALIBABA_API_KEY`；因此上下层都不会发现或调用人员跟随工具。桥接器只满足官方 `PerceiveLoopSkill` 的回调依赖：视觉命中的可选 `then` 会向当前进程的 `127.0.0.1:<DIMOS_DOG_MCP_PORT>/mcp` 发送一次公开工具调用。它不会创建模型、会话或第二个 Agent 循环。不要将任何其他设备伪装为 Go2。
 
 若要接入非 Go2 设备，应在下层扩展中组合该设备对应的 DIMOS 连接模块，并让它消费同名、同类型的 `cmd_vel: Twist` 输入。仍须保留下层的参数校验、动作串行化和零速度停止机制；不要将这些安全逻辑移动到包装器。
 
@@ -258,7 +258,7 @@ claude mcp add --transport http --scope project dimos-dog-wrapper http://127.0.0
 
 不需要包装器 hook 的独立 MCP Host 也可以直接连接底层机器的 `http://<底层机器IP>:9990/mcp`。Agent Webhook Gateway 当前仍按既定架构连接包装器，不直接连接底层。
 
-## 接入 Agent 输入与最终回复 Webhook
+## 接入 Agent 输入 Webhook 与 TTS MCP
 
 该服务需要 Node.js 22.19 或更高版本，并使用 Pi 已配置的模型和认证。先启动机器狗 MCP 与包装器，再安装并构建网关。
 
@@ -268,7 +268,7 @@ Windows PowerShell：
 Set-Location "C:/absolute/path/to/pi-hackason/components/agent-framework/agent-webhook-gateway"
 npm ci --ignore-scripts
 npm run build
-$env:AGENT_WEBHOOK_REPLY_URL = "http://reply-receiver:9080/agent-replies"
+$env:AGENT_WEBHOOK_TTS_MCP_URL = "http://tts-device:9992/mcp"
 node dist/cli.js
 ~~~
 
@@ -282,7 +282,7 @@ command -v node
 npm ci --ignore-scripts
 npm run build
 cp .env.example .env
-# 编辑 .env，至少配置 AGENT_WEBHOOK_REPLY_URL。
+# 如需语音，在 .env 中配置 AGENT_WEBHOOK_TTS_MCP_URL。
 npm run preflight:ubuntu-arm64
 ~~~
 
@@ -297,7 +297,7 @@ systemctl --user enable --now agent-webhook-gateway.service
 sudo loginctl enable-linger "$USER"
 ~~~
 
-若仓库不在默认路径，安装单元前修改 `WorkingDirectory`。服务以部署用户运行并通过 `SIGTERM` 有序关闭；不要使用 root。用 `systemctl --user status agent-webhook-gateway.service` 和 `journalctl --user -u agent-webhook-gateway.service -f` 检查状态与日志。对外监听时仍需显式设置 `AGENT_WEBHOOK_HOST=0.0.0.0`，并由受信任网络、防火墙和 TLS 终止保护，不能把普通 instruction/reply Webhook 直接暴露到公网。
+若仓库不在默认路径，安装单元前修改 `WorkingDirectory`。服务以部署用户运行并通过 `SIGTERM` 有序关闭；不要使用 root。用 `systemctl --user status agent-webhook-gateway.service` 和 `journalctl --user -u agent-webhook-gateway.service -f` 检查状态与日志。对外监听时仍需显式设置 `AGENT_WEBHOOK_HOST=0.0.0.0`，并由受信任网络、防火墙和 TLS 终止保护，不能把 instruction Webhook 或 TTS MCP 直接暴露到公网。
 
 输入端向以下端点提交契约中的 `instruction_id` 和 `text`：
 
@@ -305,31 +305,30 @@ sudo loginctl enable-linger "$USER"
 POST http://网关主机:8080/v1/instructions
 ~~~
 
-网关使用 SQLite 持久化 inbox/outbox，默认文件为当前目录下的 `data/agent-webhook.sqlite`；固定 Agent 会话默认持久化到 `data/agent-session`。相同 ID、相同文本的重投返回 `202` 且不会重复运行 Agent；同一 ID 对应不同文本返回 `409`。回复回调失败只重投同一 outbox 事件，不会重新运行 Agent 或 MCP 工具。进程恢复时，已进入处理但没有终态 outbox 的事件会得到固定失败回复，不会被重新执行。
+网关使用 SQLite 持久化 instruction inbox，默认文件为当前目录下的 `data/agent-webhook.sqlite`；固定 Agent 会话默认持久化到 `data/agent-session`。相同 ID、相同文本的重投返回 `202` 且不会重复运行 Agent；同一 ID 对应不同文本返回 `409`。模型需要向用户播报时，必须显式调用独立 TTS MCP 的 `speak(text)`；最终 assistant 文本不会自动发送。进程恢复时，已进入处理的事件直接标记完成，不会重新运行 Agent、机器狗或 TTS。
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `AGENT_WEBHOOK_REPLY_URL` | 无 | 回复接收端部署级 HTTP(S) URL，必填。 |
 | `AGENT_WEBHOOK_HOST` / `AGENT_WEBHOOK_PORT` | `127.0.0.1` / `8080` | 输入网关监听地址。 |
-| `AGENT_WEBHOOK_DATABASE_PATH` | `<cwd>/data/agent-webhook.sqlite` | inbox/outbox SQLite 文件。 |
+| `AGENT_WEBHOOK_DATABASE_PATH` | `<cwd>/data/agent-webhook.sqlite` | instruction inbox SQLite 文件。 |
 | `AGENT_WEBHOOK_MCP_URL` | `http://127.0.0.1:9991/mcp` | 包装器 MCP URL。 |
 | `AGENT_WEBHOOK_MCP_TIMEOUT_MS` | `120000` | 单次 MCP 请求超时；默认覆盖同步等待返回用户标点并问候的完整工具调用。 |
+| `AGENT_WEBHOOK_TTS_MCP_URL` | 未设置 | 独立 TTS tool-call endpoint；必须不同于机器人 MCP URL，设置后为 Agent 注册 `speak`。 |
+| `AGENT_WEBHOOK_TTS_MCP_TIMEOUT_MS` | `10000` | 单次 TTS MCP 调用超时；不会自动重试。 |
 | `AGENT_WEBHOOK_AGENT_DIR` | `~/.pi/agent` | Pi 模型、认证和设置目录。 |
 | `AGENT_WEBHOOK_SESSION_DIR` | `<cwd>/data/agent-session` | 固定 Agent 会话目录。 |
 | `AGENT_WEBHOOK_DEFAULT_SPEED_MPS` | `0.1` | 仅距离请求的部署标定速度。 |
 
-网关标准输出会以 `[agent-webhook] <ISO 时间> <事件名> <JSON 字段>` 的单行格式记录普通 instruction/reply 生命周期，包括请求被接受或拒绝、幂等重投、Agent/停止处理、最终回复生成、回调投递以及失败重试。成功日志包含完整的用户文本和最终回复；失败日志只包含简短错误消息，不打印异常堆栈，畸形请求也不会回显原始 body。终端日志因此属于敏感运行数据，只应保留在受控环境。
+网关标准输出会以 `[agent-webhook] <ISO 时间> <事件名> <JSON 字段>` 的单行格式记录 instruction 生命周期，包括请求被接受或拒绝、幂等重投、Agent/停止处理和完成状态。没有任何 `reply.*` 事件。成功日志包含完整用户文本；失败日志只包含简短错误消息，不打印异常堆栈，畸形请求也不会回显原始 body。终端日志因此属于敏感运行数据，只应保留在受控环境。
 
-其余超时和回复重投配置见 `components/agent-framework/agent-webhook-gateway/README.md`。HTTP 请求与回复 schema、停止口令规范化规则及下层开发者验收清单见 [Webhook 对接指南](docs/agent-input-webhook-integration.md)。
+当前 TTS 传输直接发送无状态 HTTP JSON-RPC `tools/call`，不执行标准 MCP `initialize` 或 session 协商。完整 HTTP schema、`speak(text)` profile、停止口令规则和验收清单见 [Agent 输入 Webhook 与 TTS MCP 对接指南](docs/agent-input-webhook-integration.md)。
 
 ### 智能项圈 Health MCP v0.2（可选）
 
-Health 消费端默认关闭。它不要求模型、DIMOS 或真实机器狗；启用时必须同时配置 wearer、当前 key ID 和 64 位小写十六进制 secret：
+Health 消费端默认关闭。它不要求模型、DIMOS 或真实机器狗；启用时只需配置 wearer，不需要 key、secret、token 或签名：
 
 ~~~powershell
 $env:AGENT_WEBHOOK_HEALTH_WEARER_ID = "xwen"
-$env:AGENT_WEBHOOK_HEALTH_KEY_ID = "health-webhook-2026-07"
-$env:AGENT_WEBHOOK_HEALTH_SECRET_HEX = "<64-lowercase-hex>"
 node dist/cli.js
 ~~~
 
@@ -346,7 +345,7 @@ Linux:   python3 -m smart_neckband.health_mcp --transport stdio
 POST http://网关主机:8080/v1/health-events
 ~~~
 
-入口完成 raw-body HMAC、时间戳、Schema 和原子幂等校验，持久化后返回 `202`。独立 worker 随后查询 event details 和 current state；只有 live、非 test、fresh 且 revision/source/wearer 一致的结果会记录 `verified_no_action`。该状态明确不调用 Agent、DimOS 或机器狗工具。完整 header、ACK、错误映射、key rotation 和测试说明见 [Health MCP v0.2 消费端对接指南](docs/health-mcp-consumer-integration.md)。
+入口不做任何鉴权，只校验 HTTP、Schema、notification ID 和原子幂等，持久化后返回 `202`。独立 worker 随后查询 event details 和 current state；只有 live、非 test、fresh 且 revision/source/wearer 一致的结果会记录 `verified_no_action`。该状态明确不调用 Agent、DimOS 或机器狗工具。完整 header、ACK、错误映射和测试说明见 [Health MCP v0.2 消费端对接指南](docs/health-mcp-consumer-integration.md)。
 
 ## 使用生命周期 hook
 
@@ -451,7 +450,7 @@ python -m unittest discover -s tests -v
 
 包装器的 DIMOS 原生 `tools/list` 集成测试需要 Python 3.10 至 3.12 和已安装的 DIMOS；不兼容环境会跳过该测试。
 
-要在不安装 DIMOS、不配置模型认证且不连接真实机器狗的环境中复现完整 Webhook → Agent → 包装器 → 底层 MCP → 回复回调链路，运行：
+要在不安装 DIMOS、不配置模型认证且不连接真实机器狗的环境中复现输入 Webhook → Agent → 机器人 MCP / TTS MCP 链路，运行：
 
 ~~~powershell
 Set-Location "C:/absolute/path/to/pi-hackason/components/agent-framework/agent-webhook-gateway"
@@ -459,7 +458,7 @@ npm ci --ignore-scripts
 npm run demo:dry-run
 ~~~
 
-该演示使用真实网关核心、临时 SQLite 和临时 HTTP 端口，替身化固定 Agent、`dimos-mcp-wrapper`、`dimos-dog-mcp` 与回复接收端；它不会导入 DIMOS 或访问机器狗。命令会断言最终回调、`move_forward`/`stop_all` 在包装器及底层各调用一次，以及停止口令在普通 Agent 请求仍被阻塞时先完成回调。相同场景已纳入网关的 `npm test`。
+该演示使用真实网关核心、临时 SQLite 和临时 HTTP 端口，替身化固定 Agent、`dimos-mcp-wrapper`、`dimos-dog-mcp` 与独立 TTS MCP；它不会导入 DIMOS 或访问机器狗。命令会断言 `move_forward` / `stop_all` 在包装器及底层各调用一次，停止口令在 Agent 忙碌时仍走快速路径且不自动播报，Agent 恢复后只显式调用一次 `speak`。不存在回复回调。
 
 Health 消费端的 focused tests 同样只使用临时端口、临时 SQLite 和 stdio fake server：
 
@@ -483,8 +482,9 @@ node node_modules/vitest/dist/cli.js --run test/health-mcp-client.test.ts
 | 想用 hook 拦截危险动作 | 当前 hook 不是拦截器。应在下层实现明确、可测试的安全策略。 |
 | 动作未按预期结束 | 立即调用 `stop_all`，检查返回的 `failed_components` 和逐项 `results`，再检查下层日志与独立急停状态。 |
 | 导航、探索、巡逻或散步没有停止 | 不要调用已隐藏的专项停止方法；再次确认 `stop_all` 已到达底层，并按其逐项结果定位失败组件。 |
-| `/v1/health-events` 返回 `404` | Health 配置未启用；检查 wearer、当前 key ID 和 secret 是否在启动前完整设置。 |
-| Health 返回 `401 invalid_signature` | 检查 key ID、64 位小写十六进制 secret、raw body 是否被代理改写，以及双方时间。 |
+| 输入已 `202` 但硬件没有播报 | `202` 只表示输入已持久化。检查是否配置 `AGENT_WEBHOOK_TTS_MCP_URL`、模型是否调用 `speak` 以及 TTS MCP 工具结果；不要等待回复 Webhook。 |
+| `/v1/health-events` 返回 `404` | Health 配置未启用；检查 `AGENT_WEBHOOK_HEALTH_WEARER_ID` 是否在启动前设置。 |
+| Health 联调端希望配置 key、secret 或签名 | 当前 Health 入口已完全移除鉴权；这些配置和 Header 均不需要，旧 Header 即使存在也会被忽略。 |
 | Health 通知已 `202` 但没有后续结果 | `202` 只表示 durable ACK；检查 stdio Health MCP 命令、独立 health queue 和审计，不要转投普通 instruction FIFO。 |
 
 ## 文档维护规则
@@ -495,7 +495,7 @@ node node_modules/vitest/dist/cli.js --run test/health-mcp-client.test.ts
 - 上下层端点、安装/启动步骤和环境变量；
 - hook 生命周期与扩展方式；
 - 下层硬件适配方式；
-- 外部指令事件和 Agent 回复事件的 Webhook 契约；
+- 外部指令事件的输入 Webhook 与独立 TTS MCP 契约；
 - 测试或运行前置条件。
 
 若变更同时影响术语、架构边界或安全不变量，还必须同步更新 `CONTEXT.md`。

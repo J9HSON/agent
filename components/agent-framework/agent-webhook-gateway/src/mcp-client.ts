@@ -42,25 +42,25 @@ export class HttpMcpToolClient implements McpToolCaller {
 		});
 		if (!response.ok) {
 			await response.body?.cancel();
-			throw new Error(`MCP wrapper returned HTTP ${response.status}`);
+			throw new Error(`MCP server returned HTTP ${response.status}`);
 		}
 
 		const payload: unknown = await response.json();
 		if (!isObject(payload)) {
-			throw new Error("MCP wrapper returned a non-object JSON response");
+			throw new Error("MCP server returned a non-object JSON response");
 		}
 		if (isObject(payload.error)) {
 			const code = typeof payload.error.code === "number" ? payload.error.code : "unknown";
 			const message = typeof payload.error.message === "string" ? payload.error.message : "unknown MCP error";
-			throw new Error(`MCP wrapper error ${code}: ${message}`);
+			throw new Error(`MCP server error ${code}: ${message}`);
 		}
 		if (!isObject(payload.result)) {
-			throw new Error("MCP wrapper response does not contain a result object");
+			throw new Error("MCP server response does not contain a result object");
 		}
 
 		const resultText = readResultText(payload.result);
 		if (payload.result.isError === true) {
-			throw new Error(resultText || "MCP wrapper reported a tool execution error");
+			throw new Error(resultText || "MCP server reported a tool execution error");
 		}
 		const toolError = readToolError(resultText);
 		if (toolError) {
@@ -94,7 +94,7 @@ function readToolError(resultText: string): string | undefined {
 	try {
 		const payload: unknown = JSON.parse(resultText);
 		if (isObject(payload) && payload.status === "error") {
-			return typeof payload.error === "string" ? payload.error : "MCP wrapper reported a tool execution error";
+			return typeof payload.error === "string" ? payload.error : "MCP server reported a tool execution error";
 		}
 	} catch {
 		return undefined;

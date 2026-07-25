@@ -9,10 +9,18 @@ import {
 import { Type } from "typebox";
 import type { McpToolCaller, UserTextAgent } from "./types.ts";
 
-export function buildAgentSystemPrompt(defaultSpeedMps: number): string {
+export function buildAgentSystemPrompt(defaultSpeedMps: number, ttsEnabled = false): string {
 	return `你是一个通过 MCP 控制机器狗的本地探索 Agent。
 
-你的最终输出会直接发给用户。最终回复必须完整、简洁、直接面向用户，不得输出内部推理、工具调用过程、原始工具结果或异常堆栈。
+语音输出规则：
+- 你的最终 assistant 文本不会通过回复 Webhook 自动发送，只用于结束内部回合。
+${
+	ttsEnabled
+		? `- 当前已配置独立 TTS MCP。所有需要让用户听到的内容，包括追问、拒绝、错误说明和动作结果，都必须调用 speak，并把完整、简洁、直接面向用户的文本放入 text。
+- speak 成功只表示 TTS MCP 接受了请求；不得虚构扬声器已经出声。speak 失败时不得自动重试或声称播报成功。`
+		: "- 当前没有配置 TTS MCP，不能向用户播报，也不得声称已经播报。"
+}
+- 面向用户的内容不得包含内部推理、工具调用过程、原始工具结果或异常堆栈。
 
 运动规则：
 - 用户可以提供“速度加时长”“距离加时长”或仅“距离”。方向可选，方向默认为向前。
@@ -22,7 +30,7 @@ export function buildAgentSystemPrompt(defaultSpeedMps: number): string {
 - 只有时长或只有速度时参数不完整，必须向用户追问，不得调用运动工具或套用默认参数。
 - 当前只支持向前和向后。左、右、转向等请求必须说明尚不支持，不得映射为前后运动。
 - 距离运动是基于速度和时长的估算，不得声称机器狗精确移动或到达了指定距离。
-- 工具调用成功只说明命令已被 MCP 接受；最终回复不得虚构机器狗遥测或物理状态。
+- 工具调用成功只说明命令已被 MCP 接受；面向用户的 speak 文本不得虚构机器狗遥测或物理状态。
 - 禁止执行 Bound（包括大小写或格式变体）以及任何空翻动作，包括前空翻、后空翻、侧空翻、连续空翻，或命令名中含 flip、somersault 的动作。
 - 收到上述禁止动作请求时必须明确拒绝；不得调用 execute_sport_command 或任何其他运动工具，也不得改写或映射为其他动作。
 
@@ -407,12 +415,36 @@ export function createDogTools(mcp: McpToolCaller) {
 	] as const;
 }
 
+export function createSpeechTool(mcp: McpToolCaller) {
+	return defineTool({
+		name: "speak",
+		label: "Speak",
+		description: "把完整的用户可见文本发送给独立 TTS MCP，由该服务负责语音合成与播放。",
+		promptSnippet: "通过独立 TTS MCP 向用户播报文本",
+		parameters: Type.Object(
+			{
+				text: Type.String({
+					minLength: 1,
+					description: "需要由 TTS 完整播报给用户的文本",
+				}),
+			},
+			{ additionalProperties: false },
+		),
+		executionMode: "sequential",
+		execute: async (_toolCallId, params, signal) => ({
+			content: [{ type: "text", text: await mcp.callTool("speak", { text: params.text }, signal) }],
+			details: {},
+		}),
+	});
+}
+
 export interface PiUserTextAgentOptions {
 	cwd: string;
 	agentDir: string;
 	sessionDir: string;
 	defaultSpeedMps: number;
 	mcp: McpToolCaller;
+	ttsMcp?: McpToolCaller;
 }
 
 export async function createPiAgentSession(options: PiUserTextAgentOptions): Promise<AgentSession> {
@@ -426,7 +458,7 @@ export async function createPiAgentSession(options: PiUserTextAgentOptions): Pro
 		noPromptTemplates: true,
 		noThemes: true,
 		noContextFiles: true,
-		systemPrompt: buildAgentSystemPrompt(options.defaultSpeedMps),
+		systemPrompt: buildAgentSystemPrompt(options.defaultSpeedMps, options.ttsMcp !== undefined),
 	});
 	await resourceLoader.reload();
 	const sessionManager = SessionManager.continueRecent(options.cwd, options.sessionDir);
@@ -437,7 +469,7 @@ export async function createPiAgentSession(options: PiUserTextAgentOptions): Pro
 		resourceLoader,
 		sessionManager,
 		noTools: "builtin",
-		customTools: [...createDogTools(options.mcp)],
+		customTools: [...createDogTools(options.mcp), ...(options.ttsMcp ? [createSpeechTool(options.ttsMcp)] : [])],
 	});
 	return session;
 }
@@ -460,11 +492,11 @@ export class PiUserTextAgent implements UserTextAgent {
 		if (assistantMessagesAfter <= assistantMessagesBefore) {
 			throw new Error("Agent did not produce a final assistant message");
 		}
-		const reply = this.session.getLastAssistantText();
-		if (!reply) {
+		const assistantText = this.session.getLastAssistantText();
+		if (!assistantText) {
 			throw new Error("Agent produced an empty final assistant message");
 		}
-		return reply;
+		return assistantText;
 	}
 
 	close(): void {

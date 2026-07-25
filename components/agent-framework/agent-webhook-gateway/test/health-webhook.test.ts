@@ -1,4 +1,3 @@
-import { createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -13,9 +12,6 @@ import {
 	HealthWebhookReceiver,
 } from "../src/index.ts";
 
-const WEBHOOK_SECRET_HEX = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-const WEBHOOK_TIMESTAMP = "1784772600";
-const WEBHOOK_SIGNATURE = "v1=217d52203ca73e60f36a9f6c323e34023e22a00d3db74af92522ae6d5c974067";
 const WEBHOOK_BODY =
 	'{"schema_version":"0.2.0","notification_id":"894d7ebf-3c7a-4818-a85d-3555a0d4dd13","notification_sequence":431,"event_id":"50d40557-8df6-47b5-abce-1ef447bf5543","event_revision":2,"transition":"resolved","event_type":"lead_off","wearer_id":"xwen","source_instance_id":"ef132c67-a98f-474a-a673-4ab6ea784790","state_revision":1849,"data_source":"live","occurred_at":"2026-07-23T02:10:03.000Z","sent_at":"2026-07-23T02:10:03.120Z","trace_id":"7a916c4a-3b3e-4ec5-8491-e5fc7e843863","test_mode":false}';
 
@@ -150,27 +146,22 @@ describe("smart-collar health webhook", () => {
 			store,
 			agent: { run: async () => "unused" },
 			mcp: { callTool: async () => "unused" },
-			replyClient: { deliver: async () => {} },
 		});
 		instructionServices.push(instructionService);
 		instructionService.start();
 		const healthReceiver = new HealthWebhookReceiver({
 			store,
 			healthService,
-			keys: new Map([["health-webhook-2026-07", Buffer.from(WEBHOOK_SECRET_HEX, "hex")]]),
-			nowEpochSeconds: () => Number(WEBHOOK_TIMESTAMP),
 		});
 		const gatewayUrl = await listen(createInstructionServer(instructionService, healthReceiver));
 
-		const send = () =>
+		const send = (legacyAuthenticationHeaders: Readonly<Record<string, string>> = {}) =>
 			fetch(`${gatewayUrl}/v1/health-events`, {
 				method: "POST",
 				headers: {
 					"content-type": "application/json; charset=utf-8",
-					"x-smart-collar-key-id": "health-webhook-2026-07",
-					"x-smart-collar-timestamp": WEBHOOK_TIMESTAMP,
 					"x-smart-collar-notification-id": "894d7ebf-3c7a-4818-a85d-3555a0d4dd13",
-					"x-smart-collar-signature": WEBHOOK_SIGNATURE,
+					...legacyAuthenticationHeaders,
 				},
 				body: WEBHOOK_BODY,
 			});
@@ -202,7 +193,11 @@ describe("smart-collar health webhook", () => {
 			},
 		]);
 
-		const duplicate = await send();
+		const duplicate = await send({
+			"x-smart-collar-key-id": "unknown",
+			"x-smart-collar-timestamp": "1",
+			"x-smart-collar-signature": "invalid",
+		});
 		expect(duplicate.status).toBe(202);
 		expect(await duplicate.json()).toEqual({
 			notification_id: "894d7ebf-3c7a-4818-a85d-3555a0d4dd13",
@@ -231,15 +226,12 @@ describe("smart-collar health webhook", () => {
 			store,
 			agent: { run: async () => "unused" },
 			mcp: { callTool: async () => "unused" },
-			replyClient: { deliver: async () => {} },
 		});
 		instructionServices.push(instructionService);
 		instructionService.start();
 		const receiver = new HealthWebhookReceiver({
 			store,
 			healthService,
-			keys: new Map([["health-webhook-2026-07", Buffer.from(WEBHOOK_SECRET_HEX, "hex")]]),
-			nowEpochSeconds: () => Number(WEBHOOK_TIMESTAMP),
 		});
 		const gatewayUrl = await listen(createInstructionServer(instructionService, receiver));
 
@@ -256,42 +248,11 @@ describe("smart-collar health webhook", () => {
 		expect(wrongContentType.status).toBe(415);
 		expect(await wrongContentType.json()).toEqual({ error: "unsupported_media_type" });
 
-		const malformedTimestamp = await fetch(`${gatewayUrl}/v1/health-events`, {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				"x-smart-collar-key-id": "unknown",
-				"x-smart-collar-timestamp": `0${WEBHOOK_TIMESTAMP}`,
-				"x-smart-collar-notification-id": "894d7ebf-3c7a-4818-a85d-3555a0d4dd13",
-				"x-smart-collar-signature": "v1=invalid",
-			},
-			body: WEBHOOK_BODY,
-		});
-		expect(malformedTimestamp.status).toBe(401);
-		expect(await malformedTimestamp.json()).toEqual({ error: "timestamp_out_of_range" });
-
-		const invalidSignature = await fetch(`${gatewayUrl}/v1/health-events`, {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				"x-smart-collar-key-id": "health-webhook-2026-07",
-				"x-smart-collar-timestamp": WEBHOOK_TIMESTAMP,
-				"x-smart-collar-notification-id": "894d7ebf-3c7a-4818-a85d-3555a0d4dd13",
-				"x-smart-collar-signature": `v1=${"0".repeat(64)}`,
-			},
-			body: WEBHOOK_BODY,
-		});
-		expect(invalidSignature.status).toBe(401);
-		expect(await invalidSignature.json()).toEqual({ error: "invalid_signature" });
-
 		const mismatchedNotificationId = await fetch(`${gatewayUrl}/v1/health-events`, {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
-				"x-smart-collar-key-id": "health-webhook-2026-07",
-				"x-smart-collar-timestamp": WEBHOOK_TIMESTAMP,
 				"x-smart-collar-notification-id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-				"x-smart-collar-signature": WEBHOOK_SIGNATURE,
 			},
 			body: WEBHOOK_BODY,
 		});
@@ -320,31 +281,25 @@ describe("smart-collar health webhook", () => {
 			store,
 			agent: { run: async () => "unused" },
 			mcp: { callTool: async () => "unused" },
-			replyClient: { deliver: async () => {} },
 		});
 		instructionServices.push(instructionService);
 		instructionService.start();
 		const receiver = new HealthWebhookReceiver({
 			store,
 			healthService,
-			keys: new Map([["health-webhook-2026-07", Buffer.from(WEBHOOK_SECRET_HEX, "hex")]]),
-			nowEpochSeconds: () => Number(WEBHOOK_TIMESTAMP),
 		});
 		const gatewayUrl = await listen(createInstructionServer(instructionService, receiver));
-		const send = (body: string, signature: string) =>
+		const send = (body: string) =>
 			fetch(`${gatewayUrl}/v1/health-events`, {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
-					"x-smart-collar-key-id": "health-webhook-2026-07",
-					"x-smart-collar-timestamp": WEBHOOK_TIMESTAMP,
 					"x-smart-collar-notification-id": "894d7ebf-3c7a-4818-a85d-3555a0d4dd13",
-					"x-smart-collar-signature": signature,
 				},
 				body,
 			});
 
-		const concurrent = await Promise.all(Array.from({ length: 5 }, () => send(WEBHOOK_BODY, WEBHOOK_SIGNATURE)));
+		const concurrent = await Promise.all(Array.from({ length: 5 }, () => send(WEBHOOK_BODY)));
 		const statuses = await Promise.all(concurrent.map((response) => response.json() as Promise<{ status: string }>));
 		expect(statuses.filter((body) => body.status === "accepted")).toHaveLength(1);
 		expect(statuses.filter((body) => body.status === "duplicate")).toHaveLength(4);
@@ -353,10 +308,7 @@ describe("smart-collar health webhook", () => {
 			'"sent_at":"2026-07-23T02:10:03.120Z"',
 			'"sent_at":"2026-07-23T02:10:03.121Z"',
 		);
-		const conflictingSignature = `v1=${createHmac("sha256", Buffer.from(WEBHOOK_SECRET_HEX, "hex"))
-			.update(`${WEBHOOK_TIMESTAMP}.${conflictingBody}`)
-			.digest("hex")}`;
-		const conflict = await send(conflictingBody, conflictingSignature);
+		const conflict = await send(conflictingBody);
 		expect(conflict.status).toBe(409);
 		expect(await conflict.json()).toEqual({ error: "notification_id_conflict" });
 	});

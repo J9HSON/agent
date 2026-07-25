@@ -1,6 +1,6 @@
 import { equal, ok } from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createHash, createHmac, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -19,8 +19,6 @@ const execFileAsync = promisify(execFile);
 const WEARER_ID = "xwen";
 const CURRENT_KEY_ID = "health-integration-current";
 const CURRENT_SECRET_HEX = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-const PREVIOUS_KEY_ID = "health-integration-previous";
-const PREVIOUS_SECRET_HEX = "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f";
 
 interface UpstreamFixtureSummary {
 	notification_id: string;
@@ -44,15 +42,13 @@ export interface HealthCrossRepoDemoSummary {
 	initialOutcome: HealthProcessingOutcome;
 	duplicateAck: string;
 	conflictStatus: number;
-	wrongSignatureStatus: number;
-	expiredTimestampStatus: number;
+	unauthenticatedStatus: number;
+	legacyAuthenticationHeadersStatus: number;
 	headerMismatchStatus: number;
 	schemaRejectionStatus: number;
 	replayOutcome: HealthProcessingOutcome;
 	eventMismatchOutcome: HealthProcessingOutcome;
 	concurrentAcks: { accepted: number; duplicate: number };
-	previousKeyStatus: number;
-	unknownKeyStatus: number;
 	healthMcpCalls: number;
 	upstreamDeliveryStatus: number;
 	rawBodySha256: string;
@@ -103,35 +99,21 @@ async function waitForOutcome(
 	throw new Error("Timed out waiting for Health notification processing");
 }
 
-function signature(secretHex: string, timestamp: number, rawBody: Buffer): string {
-	return `v1=${createHmac("sha256", Buffer.from(secretHex, "hex"))
-		.update(Buffer.from(`${timestamp}.`, "ascii"))
-		.update(rawBody)
-		.digest("hex")}`;
-}
-
 async function sendHealth(
 	gatewayUrl: string,
 	rawBody: Buffer,
 	options: {
-		keyId?: string;
-		secretHex?: string;
-		timestamp?: number;
 		notificationIdHeader?: string;
-		signatureOverride?: string;
+		legacyAuthenticationHeaders?: Readonly<Record<string, string>>;
 	} = {},
 ): Promise<HealthResponse> {
 	const payload = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
-	const timestamp = options.timestamp ?? Math.floor(Date.now() / 1000);
-	const secretHex = options.secretHex ?? CURRENT_SECRET_HEX;
 	const response = await fetch(`${gatewayUrl}/v1/health-events`, {
 		method: "POST",
 		headers: {
 			"content-type": "application/json; charset=utf-8",
-			"x-smart-collar-key-id": options.keyId ?? CURRENT_KEY_ID,
-			"x-smart-collar-timestamp": String(timestamp),
 			"x-smart-collar-notification-id": options.notificationIdHeader ?? String(payload.notification_id),
-			"x-smart-collar-signature": options.signatureOverride ?? signature(secretHex, timestamp, rawBody),
+			...options.legacyAuthenticationHeaders,
 		},
 		body: rawBody,
 	});
@@ -210,7 +192,6 @@ export async function runHealthCrossRepoDemo(options: HealthCrossRepoDemoOptions
 					return "unexpected";
 				},
 			},
-			replyClient: { deliver: async () => {} },
 		});
 		instructionService.start();
 
@@ -242,10 +223,6 @@ export async function runHealthCrossRepoDemo(options: HealthCrossRepoDemoOptions
 		const receiver = new HealthWebhookReceiver({
 			store,
 			healthService,
-			keys: new Map([
-				[CURRENT_KEY_ID, Buffer.from(CURRENT_SECRET_HEX, "hex")],
-				[PREVIOUS_KEY_ID, Buffer.from(PREVIOUS_SECRET_HEX, "hex")],
-			]),
 		});
 		healthService.start();
 		gatewayServer = createInstructionServer(instructionService, receiver);
@@ -260,12 +237,24 @@ export async function runHealthCrossRepoDemo(options: HealthCrossRepoDemoOptions
 
 		const duplicate = await sendHealth(gatewayUrl, rawBody);
 		const conflict = await sendHealth(gatewayUrl, changedBody(rawBody, { sent_at: "2026-07-23T02:10:03.121Z" }));
-		const wrongSignature = await sendHealth(gatewayUrl, rawBody, {
-			signatureOverride: `v1=${"0".repeat(64)}`,
-		});
-		const expiredTimestamp = await sendHealth(gatewayUrl, rawBody, {
-			timestamp: Math.floor(Date.now() / 1000) - 301,
-		});
+		const unauthenticatedStart = outcomes.length;
+		const unauthenticated = await sendHealth(gatewayUrl, changedBody(rawBody, { notification_id: randomUUID() }));
+		equal(unauthenticated.status, 202);
+		await waitForOutcome(outcomes, unauthenticatedStart);
+		const legacyAuthenticationHeadersStart = outcomes.length;
+		const legacyAuthenticationHeaders = await sendHealth(
+			gatewayUrl,
+			changedBody(rawBody, { notification_id: randomUUID() }),
+			{
+				legacyAuthenticationHeaders: {
+					"x-smart-collar-key-id": "unknown-key",
+					"x-smart-collar-timestamp": "1",
+					"x-smart-collar-signature": "invalid",
+				},
+			},
+		);
+		equal(legacyAuthenticationHeaders.status, 202);
+		await waitForOutcome(outcomes, legacyAuthenticationHeadersStart);
 		const headerMismatch = await sendHealth(gatewayUrl, rawBody, {
 			notificationIdHeader: randomUUID(),
 		});
@@ -310,18 +299,6 @@ export async function runHealthCrossRepoDemo(options: HealthCrossRepoDemoOptions
 		equal(concurrentAcks.duplicate, 4);
 		await waitForOutcome(outcomes, concurrentStart);
 
-		const previousStart = outcomes.length;
-		const previousBody = changedBody(rawBody, { notification_id: randomUUID() });
-		const previousKey = await sendHealth(gatewayUrl, previousBody, {
-			keyId: PREVIOUS_KEY_ID,
-			secretHex: PREVIOUS_SECRET_HEX,
-		});
-		equal(previousKey.status, 202);
-		await waitForOutcome(outcomes, previousStart);
-		const unknownKey = await sendHealth(gatewayUrl, changedBody(rawBody, { notification_id: randomUUID() }), {
-			keyId: "unknown-key",
-		});
-
 		const upstreamDatabase = new DatabaseSync(upstreamDatabasePath, { readOnly: true });
 		const healthMcpCalls = Number(
 			(upstreamDatabase.prepare("SELECT COUNT(*) AS count FROM health_mcp_audit").get() as { count: number }).count,
@@ -335,15 +312,13 @@ export async function runHealthCrossRepoDemo(options: HealthCrossRepoDemoOptions
 			initialOutcome,
 			duplicateAck: String(duplicate.body.status),
 			conflictStatus: conflict.status,
-			wrongSignatureStatus: wrongSignature.status,
-			expiredTimestampStatus: expiredTimestamp.status,
+			unauthenticatedStatus: unauthenticated.status,
+			legacyAuthenticationHeadersStatus: legacyAuthenticationHeaders.status,
 			headerMismatchStatus: headerMismatch.status,
 			schemaRejectionStatus: schemaRejection.status,
 			replayOutcome,
 			eventMismatchOutcome,
 			concurrentAcks,
-			previousKeyStatus: previousKey.status,
-			unknownKeyStatus: unknownKey.status,
 			healthMcpCalls,
 			upstreamDeliveryStatus: fixture.http_status,
 			rawBodySha256: fixture.raw_body_sha256,
