@@ -68,7 +68,7 @@ function readPath(environment: Environment, name: string, fallback: string, cwd:
 	return resolve(cwd, environment[name]?.trim() || fallback);
 }
 
-function readHealthConfig(environment: Environment): HealthGatewayConfig | undefined {
+function readHealthConfig(environment: Environment, runtimePlatform: NodeJS.Platform): HealthGatewayConfig | undefined {
 	const enabled = Object.keys(environment).some((name) => name.startsWith("AGENT_WEBHOOK_HEALTH_"));
 	if (!enabled) {
 		return undefined;
@@ -98,14 +98,15 @@ function readHealthConfig(environment: Environment): HealthGatewayConfig | undef
 	return {
 		wearerId,
 		keys,
-		mcpCommand: environment.AGENT_WEBHOOK_HEALTH_MCP_COMMAND?.trim() || "py",
-		mcpArgs: readStringArray(environment, "AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON", [
-			"-3.12",
-			"-m",
-			"smart_neckband.health_mcp",
-			"--transport",
-			"stdio",
-		]),
+		mcpCommand:
+			environment.AGENT_WEBHOOK_HEALTH_MCP_COMMAND?.trim() || (runtimePlatform === "linux" ? "python3" : "py"),
+		mcpArgs: readStringArray(
+			environment,
+			"AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON",
+			runtimePlatform === "linux"
+				? ["-m", "smart_neckband.health_mcp", "--transport", "stdio"]
+				: ["-3.12", "-m", "smart_neckband.health_mcp", "--transport", "stdio"],
+		),
 		mcpTimeoutMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_MCP_TIMEOUT_MS", 10_000),
 		retryBaseMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_RETRY_BASE_MS", 1_000),
 		retryMaxMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_RETRY_MAX_MS", 60_000),
@@ -152,6 +153,7 @@ export function readGatewayConfig(
 	environment: Environment = process.env,
 	processCwd: string = process.cwd(),
 	userHome: string = homedir(),
+	runtimePlatform: NodeJS.Platform = process.platform,
 ): GatewayConfig {
 	const dataDirectory = resolve(processCwd, "data");
 	const agentCwd = readPath(environment, "AGENT_WEBHOOK_AGENT_CWD", processCwd, processCwd);
@@ -174,6 +176,6 @@ export function readGatewayConfig(
 		agentDir: readPath(environment, "AGENT_WEBHOOK_AGENT_DIR", join(userHome, ".pi", "agent"), processCwd),
 		sessionDir: readPath(environment, "AGENT_WEBHOOK_SESSION_DIR", join(dataDirectory, "agent-session"), processCwd),
 		defaultSpeedMps: readPositiveNumber(environment, "AGENT_WEBHOOK_DEFAULT_SPEED_MPS", 0.1),
-		health: readHealthConfig(environment),
+		health: readHealthConfig(environment, runtimePlatform),
 	};
 }

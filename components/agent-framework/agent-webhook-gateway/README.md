@@ -15,7 +15,9 @@ flowchart LR
 
 ## 安装
 
-需要 Node.js 22.19 或更高版本。先确保 `dimos-dog-mcp` 和 `dimos-mcp-wrapper` 已按仓库根目录 `USAGE.md` 启动。
+需要 Node.js 22.19 或更高版本。Linux arm64 使用 Node 官方 ARMv8 64-bit 构建，不需要在板端编译 SQLite。先确保 `dimos-dog-mcp` 和 `dimos-mcp-wrapper` 已按仓库根目录 `USAGE.md` 启动。
+
+Windows PowerShell：
 
 ```powershell
 Set-Location "C:/absolute/path/to/pi-hackason/components/agent-framework/agent-webhook-gateway"
@@ -24,6 +26,45 @@ npm run build
 ```
 
 服务使用 Pi Coding Agent 的既有模型与认证配置，默认读取 `~/.pi/agent`。部署前应先用 Pi 完成模型和认证配置。
+
+### Ubuntu 24.04 arm64（地瓜派）
+
+使用 Node.js 22.19.0 或更高版本的官方 Linux ARM64 构建。systemd 单元只在 `/usr/local/bin`、`/usr/bin` 和 `/bin` 查找 Node；安装后 `command -v node` 必须返回其中之一，不要只把 Node 安装在交互 shell 才加载的 nvm 目录。不要把 x64 Node、Windows 的 `node_modules` 或本机已有的 `dist` 目录复制到板上；在板上从锁文件安装并重新构建：
+
+```bash
+uname -m
+node --version
+node -p '`${process.platform}/${process.arch}`'
+command -v node
+
+cd "$HOME/pi-hackason/components/agent-framework/agent-webhook-gateway"
+npm ci --ignore-scripts
+npm run build
+cp .env.example .env
+```
+
+预期架构输出为 `aarch64` 和 `linux/arm64`。编辑 `.env` 后，先运行板端预检：
+
+```bash
+npm run preflight:ubuntu-arm64
+```
+
+预检会拒绝非 Ubuntu 24.04、非 arm64 或低于 22.19.0 的 Node，实际打开内存 SQLite，初始化缺失的 data/session 目录，并检查构建产物、生产依赖、既有 SQLite 文件、Pi 配置目录和持久化目录权限；它不连接模型、DIMOS 或机器狗。成功输出包含 `ubuntu arm64 preflight passed`。
+
+仓库提供 user-level systemd 单元。默认假设仓库位于 `$HOME/pi-hackason`；如果路径不同，先修改单元中的 `WorkingDirectory`：
+
+```bash
+mkdir -p "$HOME/.config/systemd/user"
+cp deploy/ubuntu-arm64/agent-webhook-gateway.service "$HOME/.config/systemd/user/"
+systemctl --user daemon-reload
+systemd-run --user --wait --pipe --setenv=PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/env node --version
+systemctl --user enable --now agent-webhook-gateway.service
+sudo loginctl enable-linger "$USER"
+systemctl --user status agent-webhook-gateway.service
+journalctl --user -u agent-webhook-gateway.service -f
+```
+
+服务以当前用户运行，失败后等待 5 秒重启，并通过 `SIGTERM` 触发网关的有序关闭。不要以 root 运行；`.env`、`~/.pi/agent` 和 `data/` 应只对部署用户开放。
 
 ## 配置与启动
 
@@ -63,8 +104,8 @@ POST http://127.0.0.1:8080/v1/instructions
 | `AGENT_WEBHOOK_HEALTH_KEY_ID` | 无 | Health 当前 HMAC key ID。 |
 | `AGENT_WEBHOOK_HEALTH_SECRET_HEX` | 无 | Health 当前 32-byte secret 的 64 位小写十六进制编码。 |
 | `AGENT_WEBHOOK_HEALTH_PREVIOUS_KEY_ID` / `AGENT_WEBHOOK_HEALTH_PREVIOUS_SECRET_HEX` | 无 | 可选的前一个轮换 key；必须成对配置。 |
-| `AGENT_WEBHOOK_HEALTH_MCP_COMMAND` | `py` | 上游 stdio Health MCP 可执行文件。 |
-| `AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON` | `["-3.12","-m","smart_neckband.health_mcp","--transport","stdio"]` | 不经过 shell 的参数数组。 |
+| `AGENT_WEBHOOK_HEALTH_MCP_COMMAND` | Windows: `py`；Linux: `python3` | 上游 stdio Health MCP 可执行文件。 |
+| `AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON` | Windows 包含 `-3.12`；Linux 从 `-m` 开始 | 不经过 shell 的参数数组；两者均启动 `smart_neckband.health_mcp --transport stdio`。 |
 | `AGENT_WEBHOOK_HEALTH_MCP_TIMEOUT_MS` | `10000` | Health MCP initialize/tools call 超时。 |
 
 普通 instruction/reply MVP 没有身份校验、签名或重放防护，只能部署在受信任网络。可选 Health endpoint 使用 raw-body HMAC、`±300` 秒时间戳和当前/前一 key rotation，但非 loopback 部署仍需 TLS 和网络访问控制。

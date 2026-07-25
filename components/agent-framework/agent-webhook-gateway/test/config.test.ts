@@ -7,6 +7,7 @@ describe("gateway configuration", () => {
 			{ AGENT_WEBHOOK_REPLY_URL: "http://127.0.0.1:9080/replies" },
 			"C:/gateway",
 			"C:/Users/operator",
+			"win32",
 		);
 
 		expect(config).toMatchObject({
@@ -44,6 +45,7 @@ describe("gateway configuration", () => {
 			},
 			"C:/gateway",
 			"C:/Users/operator",
+			"win32",
 		);
 
 		expect(config.health).toMatchObject({
@@ -53,6 +55,25 @@ describe("gateway configuration", () => {
 			mcpTimeoutMs: 10_000,
 		});
 		expect([...config.health!.keys.keys()]).toEqual(["health-webhook-2026-07", "health-webhook-2026-06"]);
+	});
+
+	it("uses the native Python 3 command when Health runs on Linux", () => {
+		const config = readGatewayConfig(
+			{
+				AGENT_WEBHOOK_REPLY_URL: "http://127.0.0.1:9080/replies",
+				AGENT_WEBHOOK_HEALTH_WEARER_ID: "xwen",
+				AGENT_WEBHOOK_HEALTH_KEY_ID: "health-webhook-2026-07",
+				AGENT_WEBHOOK_HEALTH_SECRET_HEX: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+			},
+			"/home/pi/pi-hackason/components/agent-framework/agent-webhook-gateway",
+			"/home/pi",
+			"linux",
+		);
+
+		expect(config.health).toMatchObject({
+			mcpCommand: "python3",
+			mcpArgs: ["-m", "smart_neckband.health_mcp", "--transport", "stdio"],
+		});
 	});
 
 	it("fails closed for partial or malformed health webhook secrets", () => {

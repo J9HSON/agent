@@ -260,7 +260,9 @@ claude mcp add --transport http --scope project dimos-dog-wrapper http://127.0.0
 
 ## 接入 Agent 输入与最终回复 Webhook
 
-该服务需要 Node.js 22.19 或更高版本，并使用 Pi 已配置的模型和认证。先启动机器狗 MCP 与包装器，再安装并构建网关：
+该服务需要 Node.js 22.19 或更高版本，并使用 Pi 已配置的模型和认证。先启动机器狗 MCP 与包装器，再安装并构建网关。
+
+Windows PowerShell：
 
 ~~~powershell
 Set-Location "C:/absolute/path/to/pi-hackason/components/agent-framework/agent-webhook-gateway"
@@ -269,6 +271,33 @@ npm run build
 $env:AGENT_WEBHOOK_REPLY_URL = "http://reply-receiver:9080/agent-replies"
 node dist/cli.js
 ~~~
+
+Ubuntu 24.04 arm64（地瓜派）使用 Node 官方 Linux ARM64 构建。systemd 单元只在 `/usr/local/bin`、`/usr/bin` 和 `/bin` 查找 Node，`command -v node` 必须返回其中之一；不要只把 Node 安装在交互 shell 才加载的 nvm 目录。不要复制 x64/Windows 的 `node_modules` 或构建产物；在板端从锁文件安装并构建：
+
+~~~bash
+cd "$HOME/pi-hackason/components/agent-framework/agent-webhook-gateway"
+test "$(uname -m)" = "aarch64"
+node -p '`${process.platform}/${process.arch}`'
+command -v node
+npm ci --ignore-scripts
+npm run build
+cp .env.example .env
+# 编辑 .env，至少配置 AGENT_WEBHOOK_REPLY_URL。
+npm run preflight:ubuntu-arm64
+~~~
+
+Node 输出必须为 `linux/arm64`，版本必须不低于 22.19.0。预检会核对 Ubuntu 24.04、arm64、Node 版本、内置 SQLite、构建产物、生产依赖、既有 SQLite 文件及 Pi 配置目录权限，并初始化缺失的 data/session 目录；不会连接模型、DIMOS 或真实机器狗。官方 user-level systemd 单元位于 `deploy/ubuntu-arm64/agent-webhook-gateway.service`，默认仓库路径为 `$HOME/pi-hackason`：
+
+~~~bash
+mkdir -p "$HOME/.config/systemd/user"
+cp deploy/ubuntu-arm64/agent-webhook-gateway.service "$HOME/.config/systemd/user/"
+systemctl --user daemon-reload
+systemd-run --user --wait --pipe --setenv=PATH=/usr/local/bin:/usr/bin:/bin /usr/bin/env node --version
+systemctl --user enable --now agent-webhook-gateway.service
+sudo loginctl enable-linger "$USER"
+~~~
+
+若仓库不在默认路径，安装单元前修改 `WorkingDirectory`。服务以部署用户运行并通过 `SIGTERM` 有序关闭；不要使用 root。用 `systemctl --user status agent-webhook-gateway.service` 和 `journalctl --user -u agent-webhook-gateway.service -f` 检查状态与日志。对外监听时仍需显式设置 `AGENT_WEBHOOK_HOST=0.0.0.0`，并由受信任网络、防火墙和 TLS 终止保护，不能把普通 instruction/reply Webhook 直接暴露到公网。
 
 输入端向以下端点提交契约中的 `instruction_id` 和 `text`：
 
@@ -304,10 +333,11 @@ $env:AGENT_WEBHOOK_HEALTH_SECRET_HEX = "<64-lowercase-hex>"
 node dist/cli.js
 ~~~
 
-默认使用以下 stdio 命令启动上游项圈 Health MCP：
+默认按运行平台使用以下 stdio 命令启动上游项圈 Health MCP：
 
 ~~~text
-py -3.12 -m smart_neckband.health_mcp --transport stdio
+Windows: py -3.12 -m smart_neckband.health_mcp --transport stdio
+Linux:   python3 -m smart_neckband.health_mcp --transport stdio
 ~~~
 
 如上游虚拟环境或入口不同，使用 `AGENT_WEBHOOK_HEALTH_MCP_COMMAND` 和 JSON string array 形式的 `AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON` 覆盖，不经过 shell 拼接。启用后接收：
