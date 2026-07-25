@@ -17,7 +17,8 @@ from dimos.perception.spatial_memory_spec import SpatialMemorySpec
 from dimos.robot.unitree.unitree_skill_container import UnitreeSkillContainer
 
 
-USER_LOCATION_NAME = "用户身边"
+# Keep the persisted location key independent of source-file or terminal encoding.
+USER_LOCATION_NAME = "\u7528\u6237\u8eab\u8fb9"
 GREETING_COMMAND = "Hello"
 POST_ARRIVAL_DELAY_S = 1.0
 NAVIGATION_POLL_INTERVAL_S = 0.1

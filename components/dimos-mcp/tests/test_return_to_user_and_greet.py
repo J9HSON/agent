@@ -18,20 +18,22 @@ class RecordedNavigation:
     def __init__(
         self,
         events: list[tuple[str, object]],
+        *,
+        accepts_goal: bool = True,
         goal_reached: bool = True,
+        states: tuple[NavigationState, ...] = (
+            NavigationState.FOLLOWING_PATH,
+            NavigationState.IDLE,
+        ),
     ) -> None:
         self._events = events
+        self._accepts_goal = accepts_goal
         self._goal_reached = goal_reached
-        self._states = iter(
-            [
-                NavigationState.FOLLOWING_PATH,
-                NavigationState.IDLE,
-            ]
-        )
+        self._states = iter(states)
 
     def set_goal(self, goal: object) -> bool:
         self._events.append(("set_goal", goal))
-        return True
+        return self._accepts_goal
 
     def get_state(self) -> NavigationState:
         return next(self._states)
@@ -49,13 +51,15 @@ class RecordedSpatialMemory:
     def __init__(
         self,
         events: list[tuple[str, object]],
-        location_name: str = USER_LOCATION_NAME,
+        location_name: str | None = USER_LOCATION_NAME,
     ) -> None:
         self._events = events
         self._location_name = location_name
 
-    def query_tagged_location(self, query: str) -> object:
+    def query_tagged_location(self, query: str) -> object | None:
         self._events.append(("query_tagged_location", query))
+        if self._location_name is None:
+            return None
         return SimpleNamespace(
             name=self._location_name,
             position=(1.0, 2.0, 0.0),
@@ -64,11 +68,18 @@ class RecordedSpatialMemory:
 
 
 class RecordedUnitreeSkills:
-    def __init__(self, events: list[tuple[str, object]]) -> None:
+    def __init__(
+        self,
+        events: list[tuple[str, object]],
+        result: str | None = None,
+    ) -> None:
         self._events = events
+        self._result = result
 
     def execute_sport_command(self, command_name: str) -> str:
         self._events.append(("execute_sport_command", command_name))
+        if self._result is not None:
+            return self._result
         return f"'{command_name}' command executed successfully."
 
 
@@ -78,6 +89,13 @@ class FailingSpatialMemory:
 
 
 class ReturnToUserAndGreetSkillTests(unittest.TestCase):
+    def test_uses_the_exact_utf8_user_location_name(self) -> None:
+        self.assertEqual(USER_LOCATION_NAME, "用户身边")
+        self.assertEqual(
+            USER_LOCATION_NAME.encode("utf-8"),
+            b"\xe7\x94\xa8\xe6\x88\xb7\xe8\xba\xab\xe8\xbe\xb9",
+        )
+
     def test_waits_one_second_after_arrival_before_greeting(self) -> None:
         events: list[tuple[str, object]] = []
         skill = ReturnToUserAndGreetSkill()
@@ -108,6 +126,19 @@ class ReturnToUserAndGreetSkillTests(unittest.TestCase):
         self.assertEqual(events[4], ("sleep", 1.0))
         self.assertEqual(events[5], ("execute_sport_command", "Hello"))
 
+    def test_does_not_navigate_or_greet_when_the_location_is_not_found(self) -> None:
+        events: list[tuple[str, object]] = []
+        skill = ReturnToUserAndGreetSkill()
+        skill._navigation = RecordedNavigation(events)
+        skill._spatial_memory = RecordedSpatialMemory(events, None)
+        skill._unitree_skills = RecordedUnitreeSkills(events)
+
+        result = json.loads(skill.return_to_user_and_greet())
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Exact tagged location", result["error"])
+        self.assertEqual(events, [("query_tagged_location", USER_LOCATION_NAME)])
+
     def test_rejects_a_semantic_match_with_a_different_location_name(self) -> None:
         events: list[tuple[str, object]] = []
         skill = ReturnToUserAndGreetSkill()
@@ -134,7 +165,20 @@ class ReturnToUserAndGreetSkillTests(unittest.TestCase):
         self.assertIn("spatial lookup failed", result["error"])
         self.assertNotIn(("execute_sport_command", "Hello"), events)
 
-    def test_does_not_greet_when_navigation_fails(self) -> None:
+    def test_does_not_greet_when_navigation_rejects_the_goal(self) -> None:
+        events: list[tuple[str, object]] = []
+        skill = ReturnToUserAndGreetSkill()
+        skill._navigation = RecordedNavigation(events, accepts_goal=False)
+        skill._spatial_memory = RecordedSpatialMemory(events)
+        skill._unitree_skills = RecordedUnitreeSkills(events)
+
+        result = json.loads(skill.return_to_user_and_greet())
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("was not accepted", result["error"])
+        self.assertEqual([event[0] for event in events], ["query_tagged_location", "set_goal"])
+
+    def test_does_not_greet_when_navigation_fails_or_is_cancelled(self) -> None:
         events: list[tuple[str, object]] = []
         skill = ReturnToUserAndGreetSkill()
         skill._navigation = RecordedNavigation(events, goal_reached=False)
@@ -145,9 +189,60 @@ class ReturnToUserAndGreetSkillTests(unittest.TestCase):
             result = json.loads(skill.return_to_user_and_greet())
 
         self.assertEqual(result["status"], "error")
+        self.assertIn("failed or was cancelled", result["error"])
         self.assertNotIn(
             ("execute_sport_command", "Hello"),
             events,
+        )
+
+    def test_cancels_navigation_and_does_not_greet_after_timeout(self) -> None:
+        events: list[tuple[str, object]] = []
+        skill = ReturnToUserAndGreetSkill()
+        skill._navigation = RecordedNavigation(
+            events,
+            states=(NavigationState.FOLLOWING_PATH,),
+        )
+        skill._spatial_memory = RecordedSpatialMemory(events)
+        skill._unitree_skills = RecordedUnitreeSkills(events)
+
+        with (
+            patch(
+                "dimos_dog_mcp.return_to_user.time.monotonic",
+                side_effect=(10.0, 10.0, 111.0),
+            ),
+            patch("dimos_dog_mcp.return_to_user.time.sleep"),
+        ):
+            result = json.loads(skill.return_to_user_and_greet())
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("timed out", result["error"])
+        self.assertIn(("cancel_goal", None), events)
+        self.assertNotIn(("execute_sport_command", "Hello"), events)
+
+    def test_returns_an_error_when_the_greeting_command_fails(self) -> None:
+        events: list[tuple[str, object]] = []
+        skill = ReturnToUserAndGreetSkill()
+        skill._navigation = RecordedNavigation(events)
+        skill._spatial_memory = RecordedSpatialMemory(events)
+        skill._unitree_skills = RecordedUnitreeSkills(
+            events,
+            result="'Hello' command failed.",
+        )
+
+        with patch("dimos_dog_mcp.return_to_user.time.sleep"):
+            result = json.loads(skill.return_to_user_and_greet())
+
+        self.assertEqual(
+            result,
+            {
+                "status": "error",
+                "error": "Greeting command failed.",
+                "greeting_result": "'Hello' command failed.",
+            },
+        )
+        self.assertEqual(
+            [event for event in events if event[0] == "execute_sport_command"],
+            [("execute_sport_command", "Hello")],
         )
 
 
