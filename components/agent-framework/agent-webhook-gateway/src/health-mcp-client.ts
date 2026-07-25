@@ -19,6 +19,189 @@ export interface HealthMcpJsonRpcTransport {
 	close(): Promise<void>;
 }
 
+export class StreamableHttpHealthMcpTransport implements HealthMcpJsonRpcTransport {
+	private readonly endpointUrl: string;
+	private readonly timeoutMs: number;
+	private readonly fetchFunction: typeof fetch;
+	private nextRequestId = 1;
+	private sessionId?: string;
+	private closed = false;
+	private generation = 0;
+
+	get sessionGeneration(): number {
+		return this.generation;
+	}
+
+	constructor(endpointUrl: string, timeoutMs: number, fetchFunction: typeof fetch = fetch) {
+		this.endpointUrl = endpointUrl;
+		this.timeoutMs = timeoutMs;
+		this.fetchFunction = fetchFunction;
+	}
+
+	async request(method: string, params: JsonObject, externalSignal?: AbortSignal): Promise<JsonObject> {
+		this.ensureOpen();
+		const id = this.nextRequestId++;
+		const sessionId = this.sessionId;
+		const response = await this.postJsonRpc({ jsonrpc: "2.0", id, method, params }, externalSignal, sessionId);
+		if (response.status === 404 && sessionId) {
+			await response.body?.cancel();
+			this.invalidateSession();
+			throw new Error("Health MCP HTTP session expired");
+		}
+		if (!response.ok) {
+			await response.body?.cancel();
+			throw new Error(`Health MCP server returned HTTP ${response.status}`);
+		}
+		const result = await readHttpJsonRpcResult(response, id);
+		if (method === "initialize") {
+			this.captureSession(response.headers.get("mcp-session-id"));
+		}
+		return result;
+	}
+
+	async notify(method: string, params: JsonObject): Promise<void> {
+		this.ensureOpen();
+		const sessionId = this.sessionId;
+		const response = await this.postJsonRpc({ jsonrpc: "2.0", method, params }, undefined, sessionId);
+		if (response.status === 404 && sessionId) {
+			await response.body?.cancel();
+			this.invalidateSession();
+			throw new Error("Health MCP HTTP session expired");
+		}
+		if (response.status !== 202) {
+			await response.body?.cancel();
+			throw new Error(`Health MCP notification returned HTTP ${response.status}; expected 202`);
+		}
+		await response.body?.cancel();
+	}
+
+	private async postJsonRpc(
+		message: JsonObject,
+		externalSignal: AbortSignal | undefined,
+		sessionId: string | undefined,
+	): Promise<Response> {
+		const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
+		const signal = externalSignal ? AbortSignal.any([externalSignal, timeoutSignal]) : timeoutSignal;
+		const headers = new Headers({
+			accept: "application/json, text/event-stream",
+			"content-type": "application/json",
+		});
+		if (message.method !== "initialize") {
+			headers.set("mcp-protocol-version", MCP_PROTOCOL_VERSION);
+		}
+		if (sessionId) {
+			headers.set("mcp-session-id", sessionId);
+		}
+		return await this.fetchFunction(this.endpointUrl, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(message),
+			signal,
+		});
+	}
+
+	private captureSession(sessionId: string | null): void {
+		if (sessionId === null) {
+			return;
+		}
+		if (!/^[\x21-\x7e]+$/u.test(sessionId)) {
+			throw new HealthMcpProtocolError("Health MCP returned an invalid MCP-Session-Id");
+		}
+		this.sessionId = sessionId;
+	}
+
+	private invalidateSession(): void {
+		this.sessionId = undefined;
+		this.generation += 1;
+	}
+
+	private ensureOpen(): void {
+		if (this.closed) {
+			throw new Error("Health MCP HTTP transport is closed");
+		}
+	}
+
+	async close(): Promise<void> {
+		if (this.closed) {
+			return;
+		}
+		this.closed = true;
+		const sessionId = this.sessionId;
+		this.sessionId = undefined;
+		if (!sessionId) {
+			return;
+		}
+		try {
+			const response = await this.fetchFunction(this.endpointUrl, {
+				method: "DELETE",
+				headers: {
+					accept: "application/json, text/event-stream",
+					"mcp-protocol-version": MCP_PROTOCOL_VERSION,
+					"mcp-session-id": sessionId,
+				},
+				signal: AbortSignal.timeout(this.timeoutMs),
+			});
+			await response.body?.cancel();
+		} catch {
+			// Session termination is best effort during gateway shutdown.
+		}
+	}
+}
+
+async function readHttpJsonRpcResult(response: Response, requestId: number): Promise<JsonObject> {
+	const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+	if (contentType === "application/json") {
+		return readJsonRpcResult(await response.json(), requestId);
+	}
+	if (contentType === "text/event-stream") {
+		const messages = readSseJsonMessages(await response.text());
+		for (const message of messages) {
+			if (isJsonObject(message) && message.id === requestId) {
+				return readJsonRpcResult(message, requestId);
+			}
+		}
+		throw new HealthMcpProtocolError(`Health MCP SSE response did not contain JSON-RPC id ${requestId}`);
+	}
+	await response.body?.cancel();
+	throw new HealthMcpProtocolError(`Health MCP returned unsupported Content-Type ${contentType ?? "(missing)"}`);
+}
+
+function readSseJsonMessages(body: string): unknown[] {
+	const messages: unknown[] = [];
+	const normalized = body.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+	for (const event of normalized.split("\n\n")) {
+		const data = event
+			.split("\n")
+			.filter((line) => line.startsWith("data:"))
+			.map((line) => line.slice(5).trimStart())
+			.join("\n");
+		if (!data) {
+			continue;
+		}
+		try {
+			messages.push(JSON.parse(data));
+		} catch {
+			throw new HealthMcpProtocolError("Health MCP SSE response contains invalid JSON");
+		}
+	}
+	return messages;
+}
+
+function readJsonRpcResult(payload: unknown, requestId: number | string): JsonObject {
+	if (!isJsonObject(payload) || payload.jsonrpc !== "2.0" || payload.id !== requestId) {
+		throw new HealthMcpProtocolError("Health MCP JSON-RPC response has an invalid version or id");
+	}
+	if (isJsonObject(payload.error)) {
+		const code = typeof payload.error.code === "number" ? payload.error.code : "unknown";
+		const message = typeof payload.error.message === "string" ? payload.error.message : "unknown JSON-RPC error";
+		throw new HealthMcpProtocolError(`Health MCP JSON-RPC error ${code}: ${message}`);
+	}
+	if (!isJsonObject(payload.result)) {
+		throw new HealthMcpProtocolError("Health MCP JSON-RPC response is missing result");
+	}
+	return payload.result;
+}
+
 export class HealthMcpClient implements HealthMcpToolCaller {
 	private readonly transport: HealthMcpJsonRpcTransport;
 	private initializePromise?: Promise<void>;
@@ -255,21 +438,11 @@ export class StdioHealthMcpTransport implements HealthMcpJsonRpcTransport {
 		if (!pending) {
 			return;
 		}
-		if (payload.jsonrpc !== "2.0") {
-			pending.reject(new HealthMcpProtocolError("Health MCP JSON-RPC response has an invalid version"));
-			return;
+		try {
+			pending.resolve(readJsonRpcResult(payload, payload.id));
+		} catch (error) {
+			pending.reject(error instanceof Error ? error : new HealthMcpProtocolError(String(error)));
 		}
-		if (isJsonObject(payload.error)) {
-			const code = typeof payload.error.code === "number" ? payload.error.code : "unknown";
-			const message = typeof payload.error.message === "string" ? payload.error.message : "unknown JSON-RPC error";
-			pending.reject(new HealthMcpProtocolError(`Health MCP JSON-RPC error ${code}: ${message}`));
-			return;
-		}
-		if (!isJsonObject(payload.result)) {
-			pending.reject(new HealthMcpProtocolError("Health MCP JSON-RPC response is missing result"));
-			return;
-		}
-		pending.resolve(payload.result);
 	}
 
 	private rejectPending(key: string, error: Error): void {

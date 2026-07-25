@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { PiUserTextAgent } from "./agent-runtime.ts";
 import { readGatewayConfig } from "./config.ts";
-import { HealthMcpClient, StdioHealthMcpTransport } from "./health-mcp-client.ts";
+import { HealthMcpClient, StreamableHttpHealthMcpTransport } from "./health-mcp-client.ts";
 import { HealthNotificationService } from "./health-service.ts";
 import { HealthWebhookReceiver } from "./health-webhook.ts";
 import { createInstructionServer } from "./http-server.ts";
@@ -31,7 +31,7 @@ async function main(): Promise<void> {
 	let healthReceiver: HealthWebhookReceiver | undefined;
 	if (config.health) {
 		const healthMcp = new HealthMcpClient(
-			new StdioHealthMcpTransport(config.health.mcpCommand, config.health.mcpArgs, config.health.mcpTimeoutMs),
+			new StreamableHttpHealthMcpTransport(config.health.mcpUrl, config.health.mcpTimeoutMs),
 		);
 		healthService = new HealthNotificationService({
 			store,

@@ -3,7 +3,7 @@ import { readGatewayConfig } from "../src/config.ts";
 
 describe("gateway configuration", () => {
 	it("keeps the documented local defaults without an output webhook", () => {
-		const config = readGatewayConfig({}, "C:/gateway", "C:/Users/operator", "win32");
+		const config = readGatewayConfig({}, "C:/gateway", "C:/Users/operator");
 
 		expect(config).toMatchObject({
 			host: "127.0.0.1",
@@ -48,38 +48,44 @@ describe("gateway configuration", () => {
 		).toThrow("AGENT_WEBHOOK_TTS_MCP_URL must differ from AGENT_WEBHOOK_MCP_URL");
 	});
 
-	it("enables the isolated health receiver without authentication configuration", () => {
+	it("enables the isolated health receiver with a remote MCP URL and no authentication", () => {
 		const config = readGatewayConfig(
 			{
 				AGENT_WEBHOOK_HEALTH_WEARER_ID: "xwen",
+				AGENT_WEBHOOK_HEALTH_MCP_URL: "http://192.168.66.224:8765/mcp",
 			},
 			"C:/gateway",
 			"C:/Users/operator",
-			"win32",
 		);
 
 		expect(config.health).toMatchObject({
 			wearerId: "xwen",
-			mcpCommand: "py",
-			mcpArgs: ["-3.12", "-m", "smart_neckband.health_mcp", "--transport", "stdio"],
+			mcpUrl: "http://192.168.66.224:8765/mcp",
 			mcpTimeoutMs: 10_000,
 		});
 	});
 
-	it("uses the native Python 3 command when Health runs on Linux", () => {
-		const config = readGatewayConfig(
-			{
-				AGENT_WEBHOOK_HEALTH_WEARER_ID: "xwen",
-			},
-			"/home/pi/pi-hackason/components/agent-framework/agent-webhook-gateway",
-			"/home/pi",
-			"linux",
-		);
-
-		expect(config.health).toMatchObject({
-			mcpCommand: "python3",
-			mcpArgs: ["-m", "smart_neckband.health_mcp", "--transport", "stdio"],
-		});
+	it("requires both Health deployment values and validates the remote URL", () => {
+		expect(() =>
+			readGatewayConfig({ AGENT_WEBHOOK_HEALTH_WEARER_ID: "xwen" }, "C:/gateway", "C:/Users/operator"),
+		).toThrow("AGENT_WEBHOOK_HEALTH_MCP_URL is required");
+		expect(() =>
+			readGatewayConfig(
+				{ AGENT_WEBHOOK_HEALTH_MCP_URL: "http://health-host:8765/mcp" },
+				"C:/gateway",
+				"C:/Users/operator",
+			),
+		).toThrow("AGENT_WEBHOOK_HEALTH_WEARER_ID is required");
+		expect(() =>
+			readGatewayConfig(
+				{
+					AGENT_WEBHOOK_HEALTH_WEARER_ID: "xwen",
+					AGENT_WEBHOOK_HEALTH_MCP_URL: "not-a-url",
+				},
+				"C:/gateway",
+				"C:/Users/operator",
+			),
+		).toThrow("AGENT_WEBHOOK_HEALTH_MCP_URL must be an absolute HTTP(S) URL");
 	});
 
 	it("ignores removed health authentication variables", () => {

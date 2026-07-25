@@ -34,7 +34,7 @@
 | Agent 最终文本 | Agent 内部回合结果 | 只用于结束当前内部回合，不会自动通过 Webhook 或其他传输发送给用户。需要播报时必须显式调用 TTS MCP。 |
 | 健康通知 | 独立输入端契约 | 智能项圈发送的、带稳定 `notification_id` 和 event revision 的无鉴权唤醒通知；它不是权威健康状态，也不是自然语言指令。 |
 | Health Webhook 接收器 | `components/agent-framework/agent-webhook-gateway` | 在独立 health 表和队列中校验 schema、原子去重并持久化 `/v1/health-events`，ACK 后查询上游只读 Health MCP。 |
-| 上游 Health MCP | 配置的 stdio 子进程 | `smart-neckband` 仓库实现的权威健康工程状态读取边界；本仓库不生产 ECG/IMU 状态或健康事件。 |
+| 上游 Health MCP | `AGENT_WEBHOOK_HEALTH_MCP_URL` | 运行在项圈上位机的 MCP 2025-11-25 Streamable HTTP 权威健康工程状态读取边界；本仓库不生产 ECG/IMU 状态或健康事件，也不在地瓜派启动该服务。 |
 
 ```mermaid
 flowchart LR
@@ -47,7 +47,7 @@ flowchart LR
     B -. non-blocking lifecycle events .-> F[hook adapters]
     A -->|speak text| T[TTS MCP and speaker]
     H[智能项圈 Health Webhook] -->|POST /v1/health-events| G
-    G -->|stdio read-only tools| M[smart-neckband Health MCP]
+    G -->|Streamable HTTP read-only tools| M[项圈上位机 Health MCP]
 ```
 
 ## 不变量
@@ -63,7 +63,7 @@ flowchart LR
 9. 网关不得提供出站回复 Webhook、回复 outbox 或自动最终文本投递。需要向用户播报时，只能由模型显式调用独立 TTS MCP 的 `speak(text)`。
 10. `speak` 每次只携带完整、直接面向用户的文本，不得包含内部执行细节、工具调用、推理或异常堆栈。Agent 最终 assistant 文本仅结束内部回合，不得绕过 `speak` 自动发送。
 11. 当前 MVP 每个部署只有一个固定 Agent 会话；输入网关不得接受或信任外部传入的 Agent 或会话路由标识。
-12. 当前 instruction Webhook、独立 TTS MCP 和 Health Webhook 均不提供身份校验、签名或重放防护；它们只能被视为受信任环境内的黑客松临时集成边界，不得被描述为安全的公网接口。非 loopback 部署必须使用受信任网络、主机防火墙和 TLS 终止限制访问。
+12. 当前 instruction Webhook、独立 TTS MCP、Health Webhook 和 Gateway 到上游 Health MCP 的请求均不提供身份校验、签名或重放防护；它们只能被视为受信任环境内的黑客松临时集成边界，不得被描述为安全的公网接口。非 loopback 部署必须使用受信任网络、主机防火墙和 TLS 终止限制访问。
 13. 除语音停止口令外，输入网关只承载异步的自然语言事件，不能作为实时控制或紧急停止路径；语音停止口令也不能替代独立、直接的物理安全路径。
 14. 固定 Agent 会话的普通外部指令事件按持久化受理顺序串行处理；一个事件达到终态后才开始下一事件。
 15. Agent 无法完成回合时，网关只记录脱敏错误并将输入标记为完成；不得自动生成回退语、调用 TTS 或对外发送部分模型文本。
@@ -80,7 +80,7 @@ flowchart LR
 26. 底层 Go2 Blueprint 不得组合官方 `McpClient` 或任何 LLM Agent。官方 `PerceiveLoopSkill` 所需的 `AgentSpec` 由无模型的 `StandaloneAgentBridge` 提供：无 `then` 的视觉命中继续通过 MCP 工具流通知上层；带 `then` 的命中只允许经底层本机公开 MCP 端点调用一个公开工具。该桥接器不是对话 Agent，也不拥有用户会话。
 27. Go2 实机入口必须等待 `ModuleCoordinator.build()` 完成官方模块启动，再通过锁定版 `GO2Connection.publish_request` 向官方 Sport endpoint 发送 `SwitchJoystick`（API `1027`，`data=true`），显式启用 `cmd_vel` 使用的固件输入。响应状态码不为 `0`、响应结构无效或调用抛出异常时，必须停止 coordinator 并让进程启动失败；不得进入服务主循环或声称 MCP 已就绪。状态码成功不是独立的底盘运动证明，dry-run 不执行该调用。
 28. Health Webhook 必须使用独立 `/v1/health-events`、表、去重命名空间、durable queue 和 worker；不得复用 `/v1/instructions`、普通 Agent FIFO 或 TTS MCP。
-29. Health Webhook body 只作为唤醒通知。ACK 只表示通知已通过 HTTP/schema 校验、按 raw-body digest 原子持久化和入队；处理方必须再查询 `health.get_event_details` 与 `health.get_current_state`。
+29. Health Webhook body 只作为唤醒通知。ACK 只表示通知已通过 HTTP/schema 校验、按 raw-body digest 原子持久化和入队；处理方必须通过配置的上位机 Streamable HTTP MCP 再查询 `health.get_event_details` 与 `health.get_current_state`，不得在地瓜派本地 spawn Health MCP。
 30. Health 消费方在固定代码中要求 contract `0.2.0`、event revision 不回退、wearer/source 一致、`data_source=live`、`test_mode=false` 和 `freshness=fresh`。任何失败都不得使用旧生理值或交给 LLM 绕过。
 31. v0.2 Health 事件不得调用 Agent、DimOS 或机器狗工具。`verified_no_action` 只表示权威状态检查与审计完成，不表示健康正常、医学安全或任何物理动作完成。
 32. 固定 Agent 的系统提示词必须拒绝 `Bound` 以及所有空翻请求，不得调用 `execute_sport_command` 或其他运动工具，也不得改写为替代动作。该限制只约束固定 Agent，不改变 21 工具 MCP 契约，也不是程序级安全门；直接 MCP Host 不受该提示词约束。
@@ -95,7 +95,7 @@ flowchart LR
 - 独立底层 MCP 默认只监听 `127.0.0.1:9990`。跨机器调用时必须显式设置 `DIMOS_DOG_MCP_HOST=0.0.0.0` 或指定 interface 地址，并通过受信任网络和主机防火墙限制访问。
 - 包装器默认请求超时为 120 秒，配置通过 `DIMOS_MCP_WRAPPER_*` 环境变量提供，以覆盖同步等待导航终态的组合工具。它不直接打开硬件连接。
 - Agent Webhook Gateway 要求 Node.js 22.19 或更高版本，使用 Node 原生 SQLite 持久化 instruction inbox，并读取既有 Pi Agent 模型与认证配置；普通机器狗 MCP 调用默认超时为 120 秒，TTS MCP 默认超时为 10 秒。
-- Health 消费端默认关闭。配置 wearer 后，Gateway 启用无鉴权的 `/v1/health-events`，并按配置用 stdio 启动上游 Health MCP；不配置时不会打开健康入口或子进程。
+- Health 消费端默认关闭。同时配置 wearer 与项圈上位机 MCP URL 后，Gateway 启用无鉴权的 `/v1/health-events`，并通过内网 Streamable HTTP 查询上游 Health MCP；不配置时不会打开健康入口，任何情况下都不会启动本地 Health MCP 子进程。
 
 ## 测试 seam
 
@@ -110,6 +110,6 @@ flowchart LR
 - TTS MCP seam：未配置时不注册 `speak`；配置后只向独立端点发送 `speak(text)`，调用失败不自动重试，进程恢复不重复播报。
 - 停止快速路径 seam：只匹配规范化后的“停”或 `stop`，绕过 Agent 并单次调用 `stop_all`；底层逐项停止并报告失败组件。
 - Health Webhook seam：无鉴权请求、严格 HTTP/schema 验证顺序、并发原子去重、独立 durable queue、`202 accepted|duplicate` 与固定错误映射。
-- Health MCP seam：stdio initialize、两个只读查询、TextContent/structuredContent 一致性，以及 live/test/freshness/revision 固定门；结果永不进入机器狗动作路径。
+- Health MCP seam：Streamable HTTP initialize/session、两个只读查询、TextContent/structuredContent 一致性、无 `Authorization`，以及 live/test/freshness/revision 固定门；stdio 仅保留用于上游业务契约 fixture，结果永不进入机器狗动作路径。
 
 这些名称应直接用于后续的实现、测试、Issue 和设计讨论，避免将包装器误称为机器人控制器或将 hook 误称为同步拦截器。

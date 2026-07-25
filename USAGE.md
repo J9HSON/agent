@@ -6,7 +6,7 @@
 
 输入端系统通过 [Agent 输入 Webhook 与 TTS MCP 对接指南](docs/agent-input-webhook-integration.md) 向固定 Agent 提交完整用户文本；本框架不处理麦克风或语音识别。`components/agent-framework/agent-webhook-gateway` 持久化输入并串行运行固定 Pi Agent 会话，不再提供出站回复 Webhook。硬件需要语音时，配置独立 TTS MCP，模型会主动调用 `speak(text)`；最终 assistant 文本只用于结束内部回合，不会自动发送。系统提示词要求模型对参数不明确的运动请求追问，并支持“速度加时长”“距离加时长”或仅说距离，方向可选且默认向前。固定 Agent 还拒绝 `Bound` 和所有空翻请求。Agent 可调用锁定版 DiMOS 的 14 个非停止官方 MCP 工具、7 个自研工具，以及可选的独立 TTS `speak`；后者不属于机器狗 MCP 的 21 工具契约。规范化后精确等于“停”或 `stop` 的口令绕过 Agent 并直接触发 `stop_all`，不会自动播报。`stop_all` 仍不等同于物理急停。
 
-智能项圈 Health MCP v0.2 使用同一 Gateway 进程中的独立无鉴权入口和 durable health queue，详见 [Health MCP v0.2 消费端对接指南](docs/health-mcp-consumer-integration.md)。健康通知不会进入 Agent，也不会触发机器狗动作；项圈采集、事件生成和 Health MCP Server 仍由上游 `smart-neckband` 仓库负责。
+智能项圈 Health MCP v0.2 使用同一 Gateway 进程中的独立无鉴权入口和 durable health queue，详见 [Health MCP v0.2 消费端对接指南](docs/health-mcp-consumer-integration.md)。健康通知不会进入 Agent，也不会触发机器狗动作；项圈采集、事件生成和 Health MCP Server 仍由上游 `smart-neckband` 仓库负责，并运行在项圈上位机。地瓜派 Gateway 只通过内网 Streamable HTTP URL 连接，不会本地启动 Health MCP。
 
 ## 架构与职责
 
@@ -21,7 +21,7 @@ flowchart LR
     W -. 生命周期事件 .-> K["可选 hook"]
     A -->|"speak(text)"| O["独立 TTS MCP 与扬声器"]
     H["智能项圈"] -->|"POST /v1/health-events"| A
-    A -->|"stdio read-only Health MCP"| M["smart-neckband Health MCP"]
+    A -->|"HTTP :8765/mcp"| M["项圈上位机 Health MCP"]
 ~~~
 
 | 层级 | 组件 | 使用者应负责的事项 |
@@ -325,27 +325,21 @@ POST http://网关主机:8080/v1/instructions
 
 ### 智能项圈 Health MCP v0.2（可选）
 
-Health 消费端默认关闭。它不要求模型、DIMOS 或真实机器狗；启用时只需配置 wearer，不需要 key、secret、token 或签名：
+Health 消费端默认关闭。它不要求模型、DIMOS 或真实机器狗；启用时必须配置 wearer 和项圈上位机 MCP URL，不需要 key、secret、token 或签名：
 
 ~~~powershell
 $env:AGENT_WEBHOOK_HEALTH_WEARER_ID = "xwen"
+$env:AGENT_WEBHOOK_HEALTH_MCP_URL = "http://项圈上位机IP:8765/mcp"
 node dist/cli.js
 ~~~
 
-默认按运行平台使用以下 stdio 命令启动上游项圈 Health MCP：
-
-~~~text
-Windows: py -3.12 -m smart_neckband.health_mcp --transport stdio
-Linux:   python3 -m smart_neckband.health_mcp --transport stdio
-~~~
-
-如上游虚拟环境或入口不同，使用 `AGENT_WEBHOOK_HEALTH_MCP_COMMAND` 和 JSON string array 形式的 `AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON` 覆盖，不经过 shell 拼接。启用后接收：
+`AGENT_WEBHOOK_HEALTH_MCP_URL` 必须是项圈上位机提供的 MCP 2025-11-25 Streamable HTTP endpoint。Gateway 会完成 initialize、可选 session 协商和两个只读 tool call，不会 spawn Python 或读取上位机文件。启用后接收：
 
 ~~~text
 POST http://网关主机:8080/v1/health-events
 ~~~
 
-入口不做任何鉴权，只校验 HTTP、Schema、notification ID 和原子幂等，持久化后返回 `202`。独立 worker 随后查询 event details 和 current state；只有 live、非 test、fresh 且 revision/source/wearer 一致的结果会记录 `verified_no_action`。该状态明确不调用 Agent、DimOS 或机器狗工具。完整 header、ACK、错误映射和测试说明见 [Health MCP v0.2 消费端对接指南](docs/health-mcp-consumer-integration.md)。
+Webhook 入口不做任何鉴权，只校验 HTTP、Schema、notification ID 和原子幂等，持久化后返回 `202`。Gateway 发往 Health MCP 的 HTTP 请求同样不携带 `Authorization`。独立 worker 随后查询 event details 和 current state；只有 live、非 test、fresh 且 revision/source/wearer 一致的结果会记录 `verified_no_action`。该状态明确不调用 Agent、DimOS 或机器狗工具。完整 header、ACK、错误映射和测试说明见 [Health MCP v0.2 消费端对接指南](docs/health-mcp-consumer-integration.md)。
 
 ## 使用生命周期 hook
 
@@ -460,7 +454,7 @@ npm run demo:dry-run
 
 该演示使用真实网关核心、临时 SQLite 和临时 HTTP 端口，替身化固定 Agent、`dimos-mcp-wrapper`、`dimos-dog-mcp` 与独立 TTS MCP；它不会导入 DIMOS 或访问机器狗。命令会断言 `move_forward` / `stop_all` 在包装器及底层各调用一次，停止口令在 Agent 忙碌时仍走快速路径且不自动播报，Agent 恢复后只显式调用一次 `speak`。不存在回复回调。
 
-Health 消费端的 focused tests 同样只使用临时端口、临时 SQLite 和 stdio fake server：
+Health 消费端的 focused tests 同样只使用临时端口、临时 SQLite、HTTP fake server 和 stdio 业务契约 fixture：
 
 ~~~powershell
 node node_modules/vitest/dist/cli.js --run test/health-webhook.test.ts
@@ -485,7 +479,8 @@ node node_modules/vitest/dist/cli.js --run test/health-mcp-client.test.ts
 | 输入已 `202` 但硬件没有播报 | `202` 只表示输入已持久化。检查是否配置 `AGENT_WEBHOOK_TTS_MCP_URL`、模型是否调用 `speak` 以及 TTS MCP 工具结果；不要等待回复 Webhook。 |
 | `/v1/health-events` 返回 `404` | Health 配置未启用；检查 `AGENT_WEBHOOK_HEALTH_WEARER_ID` 是否在启动前设置。 |
 | Health 联调端希望配置 key、secret 或签名 | 当前 Health 入口已完全移除鉴权；这些配置和 Header 均不需要，旧 Header 即使存在也会被忽略。 |
-| Health 通知已 `202` 但没有后续结果 | `202` 只表示 durable ACK；检查 stdio Health MCP 命令、独立 health queue 和审计，不要转投普通 instruction FIFO。 |
+| Gateway 启动时报缺少 `AGENT_WEBHOOK_HEALTH_MCP_URL` | Health 跨机消费要求 wearer 与上位机 URL 同时配置；URL 应形如 `http://<项圈上位机IP>:8765/mcp`。 |
+| Health 通知已 `202` 但没有后续结果 | `202` 只表示 durable ACK；检查项圈上位机 HTTP MCP 是否监听、内网端口是否可达、独立 health queue 和审计，不要转投普通 instruction FIFO。 |
 
 ## 文档维护规则
 

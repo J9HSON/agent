@@ -20,8 +20,7 @@ export interface GatewayConfig {
 
 export interface HealthGatewayConfig {
 	wearerId: string;
-	mcpCommand: string;
-	mcpArgs: readonly string[];
+	mcpUrl: string;
 	mcpTimeoutMs: number;
 	retryBaseMs: number;
 	retryMaxMs: number;
@@ -29,8 +28,7 @@ export interface HealthGatewayConfig {
 
 const HEALTH_CONFIGURATION_NAMES = [
 	"AGENT_WEBHOOK_HEALTH_WEARER_ID",
-	"AGENT_WEBHOOK_HEALTH_MCP_COMMAND",
-	"AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON",
+	"AGENT_WEBHOOK_HEALTH_MCP_URL",
 	"AGENT_WEBHOOK_HEALTH_MCP_TIMEOUT_MS",
 	"AGENT_WEBHOOK_HEALTH_RETRY_BASE_MS",
 	"AGENT_WEBHOOK_HEALTH_RETRY_MAX_MS",
@@ -78,7 +76,7 @@ function readPath(environment: Environment, name: string, fallback: string, cwd:
 	return resolve(cwd, environment[name]?.trim() || fallback);
 }
 
-function readHealthConfig(environment: Environment, runtimePlatform: NodeJS.Platform): HealthGatewayConfig | undefined {
+function readHealthConfig(environment: Environment): HealthGatewayConfig | undefined {
 	const enabled = HEALTH_CONFIGURATION_NAMES.some((name) => environment[name] !== undefined);
 	if (!enabled) {
 		return undefined;
@@ -90,15 +88,7 @@ function readHealthConfig(environment: Environment, runtimePlatform: NodeJS.Plat
 
 	return {
 		wearerId,
-		mcpCommand:
-			environment.AGENT_WEBHOOK_HEALTH_MCP_COMMAND?.trim() || (runtimePlatform === "linux" ? "python3" : "py"),
-		mcpArgs: readStringArray(
-			environment,
-			"AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON",
-			runtimePlatform === "linux"
-				? ["-m", "smart_neckband.health_mcp", "--transport", "stdio"]
-				: ["-3.12", "-m", "smart_neckband.health_mcp", "--transport", "stdio"],
-		),
+		mcpUrl: readHttpUrl(environment, "AGENT_WEBHOOK_HEALTH_MCP_URL"),
 		mcpTimeoutMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_MCP_TIMEOUT_MS", 10_000),
 		retryBaseMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_RETRY_BASE_MS", 1_000),
 		retryMaxMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_RETRY_MAX_MS", 60_000),
@@ -113,28 +103,10 @@ function readRequired(environment: Environment, name: string): string {
 	return value;
 }
 
-function readStringArray(environment: Environment, name: string, fallback: readonly string[]): readonly string[] {
-	const raw = environment[name];
-	if (raw === undefined) {
-		return fallback;
-	}
-	let value: unknown;
-	try {
-		value = JSON.parse(raw);
-	} catch {
-		throw new Error(`${name} must be a JSON array of strings`);
-	}
-	if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-		throw new Error(`${name} must be a JSON array of strings`);
-	}
-	return value;
-}
-
 export function readGatewayConfig(
 	environment: Environment = process.env,
 	processCwd: string = process.cwd(),
 	userHome: string = homedir(),
-	runtimePlatform: NodeJS.Platform = process.platform,
 ): GatewayConfig {
 	const dataDirectory = resolve(processCwd, "data");
 	const agentCwd = readPath(environment, "AGENT_WEBHOOK_AGENT_CWD", processCwd, processCwd);
@@ -160,6 +132,6 @@ export function readGatewayConfig(
 		agentDir: readPath(environment, "AGENT_WEBHOOK_AGENT_DIR", join(userHome, ".pi", "agent"), processCwd),
 		sessionDir: readPath(environment, "AGENT_WEBHOOK_SESSION_DIR", join(dataDirectory, "agent-session"), processCwd),
 		defaultSpeedMps: readPositiveNumber(environment, "AGENT_WEBHOOK_DEFAULT_SPEED_MPS", 0.1),
-		health: readHealthConfig(environment, runtimePlatform),
+		health: readHealthConfig(environment),
 	};
 }

@@ -2,7 +2,7 @@
 
 该服务为固定 Pi Agent 会话提供持久化输入 Webhook，并可选注册独立 TTS MCP 的 `speak(text)` 工具。输入端只提交用户文本；Agent 通过 `dimos-mcp-wrapper` 使用机器狗工具，并在确实需要让用户听到内容时主动调用 TTS MCP。服务不包含出站回复 Webhook、回复 outbox 或自动 TTS 回调。
 
-同一进程还可选承载智能项圈 Health MCP v0.2 的独立消费端。Health 通知使用无鉴权入口、独立表、队列和 stdio MCP client，不进入 Agent，也不触发物理动作。
+同一进程还可选承载智能项圈 Health MCP v0.2 的独立消费端。Health 通知使用无鉴权入口、独立表、队列和远程 Streamable HTTP MCP client，不进入 Agent，也不触发物理动作。Health MCP Server 运行在项圈上位机，Gateway 不在地瓜派本地启动它。
 
 ```mermaid
 flowchart LR
@@ -12,7 +12,7 @@ flowchart LR
     A -->|"机器狗工具"| W["dimos-mcp-wrapper :9991/mcp"]
     A -->|"speak(text)"| T["独立 TTS MCP"]
     H["智能项圈"] -->|"POST /v1/health-events"| G
-    G -->|"stdio Health MCP"| M["smart-neckband Health MCP"]
+    G -->|"HTTP :8765/mcp"| M["项圈上位机 Health MCP"]
 ```
 
 ## 安装
@@ -46,7 +46,7 @@ cp .env.example .env
 npm run preflight:ubuntu-arm64
 ```
 
-预检会检查 Ubuntu 24.04、arm64、Node 版本、原生 SQLite、构建产物、生产依赖、Pi 配置目录和持久化目录权限。如果配置了 TTS MCP URL，还会验证它是绝对 HTTP(S) URL；预检不会连接模型、DIMOS、TTS 或机器狗。
+预检会检查 Ubuntu 24.04、arm64、Node 版本、原生 SQLite、构建产物、生产依赖、Pi 配置目录和持久化目录权限。如果配置了 TTS MCP 或 Health MCP URL，还会验证它是绝对 HTTP(S) URL；预检不会连接模型、DIMOS、TTS、Health MCP 或机器狗。
 
 仓库提供 user-level systemd 单元，默认仓库位于 `$HOME/pi-hackason`：
 
@@ -71,7 +71,7 @@ npm run build
 npm run start
 ```
 
-远程机器狗联调时，将 `AGENT_WEBHOOK_MCP_URL` 指向 `dimos-mcp-wrapper` 的 `:9991/mcp`，不要直接连接 `dimos-dog-mcp`。硬件需要 TTS 时，将 `AGENT_WEBHOOK_TTS_MCP_URL` 指向另一个实现 `speak(text)` 的端点；两个 URL 不得相同。当前传输是项目既有的无状态 HTTP JSON-RPC `tools/call` profile，不执行标准 MCP `initialize` 或 session 协商。`npm run start:dev` 使用同一 `.env` 直接运行 TypeScript 入口。
+远程机器狗联调时，将 `AGENT_WEBHOOK_MCP_URL` 指向 `dimos-mcp-wrapper` 的 `:9991/mcp`，不要直接连接 `dimos-dog-mcp`。硬件需要 TTS 时，将 `AGENT_WEBHOOK_TTS_MCP_URL` 指向另一个实现 `speak(text)` 的端点；两个 URL 不得相同。机器人和 TTS 传输使用项目既有的无状态 HTTP JSON-RPC `tools/call` profile，不执行标准 MCP session 协商。Health 则通过 `AGENT_WEBHOOK_HEALTH_MCP_URL` 连接项圈上位机的标准 MCP 2025-11-25 Streamable HTTP endpoint，完成 initialize 和可选 session 协商。`npm run start:dev` 使用同一 `.env` 直接运行 TypeScript 入口。
 
 默认输入端点：
 
@@ -93,9 +93,10 @@ POST http://127.0.0.1:8080/v1/instructions
 | `AGENT_WEBHOOK_SESSION_DIR` | `<cwd>/data/agent-session` | 固定 Agent 会话的持久化目录。 |
 | `AGENT_WEBHOOK_DEFAULT_SPEED_MPS` | `0.1` | 用户只给距离时用于估算时长的部署标定速度。 |
 | `AGENT_WEBHOOK_HEALTH_WEARER_ID` | 无 | 设置后启用 Health；单实例 wearer ID。 |
-| `AGENT_WEBHOOK_HEALTH_MCP_COMMAND` | Windows: `py`；Linux: `python3` | 上游 stdio Health MCP 可执行文件。 |
-| `AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON` | 平台相关 | 不经过 shell 的 `smart_neckband.health_mcp --transport stdio` 参数数组。 |
+| `AGENT_WEBHOOK_HEALTH_MCP_URL` | 无 | 启用 Health 时必填；项圈上位机的 Streamable HTTP MCP URL，例如 `http://192.168.66.224:8765/mcp`。 |
 | `AGENT_WEBHOOK_HEALTH_MCP_TIMEOUT_MS` | `10000` | Health MCP initialize/tools call 超时。 |
+| `AGENT_WEBHOOK_HEALTH_RETRY_BASE_MS` | `1000` | Health transport 或可重试领域失败后的队列重试基数。 |
+| `AGENT_WEBHOOK_HEALTH_RETRY_MAX_MS` | `60000` | Health 本地指数退避上限。 |
 
 输入 Webhook、TTS MCP 和可选 Health endpoint 都没有身份校验、签名或重放防护，只能部署在受信任网络。非 loopback 部署仍需 TLS、主机防火墙和网络访问控制。
 
@@ -155,11 +156,12 @@ $env:SMART_NECKBAND_HEALTH_PYTHON = "$env:SMART_NECKBAND_HEALTH_ROOT/pc_app/.ven
 npm run demo:health-cross-repo
 ```
 
-该命令使用临时上游 Health SQLite、临时 Gateway SQLite 和临时端口，运行真实的上游 Health store、Webhook sender、Pi Health receiver、durable queue 与上游 stdio MCP。上游 fixture 可附带旧签名 Header，但 Gateway 不读取它们。Agent、DIMOS 和 robot 调用计数必须均为 0。
+该命令使用临时上游 Health SQLite、临时 Gateway SQLite 和临时端口，运行真实的上游 Health store、Webhook sender、Pi Health receiver、durable queue，并通过 stdio fixture 验证上游工具业务契约。stdio 只属于这个跨仓库测试 seam，生产 CLI 只连接 `AGENT_WEBHOOK_HEALTH_MCP_URL`，不会启动本地 Health 进程。上游 fixture 可附带旧签名 Header，但 Gateway 不读取它们。Agent、DIMOS 和 robot 调用计数必须均为 0。
 
 ## 扩展边界
 
 - 用户文本运行时实现 `UserTextAgent`。
 - 机器人 MCP 和 TTS MCP 传输均实现 `McpToolCaller`，但使用独立实例和 URL。
+- 生产 Health MCP 传输使用独立的 MCP 2025-11-25 Streamable HTTP client，不复用机器人/TTS 的无状态 profile。
 - `speak` 的名称与 `{ text: string }` 参数属于硬件 TTS MCP 接入契约。
 - 输入 Webhook schema、稳定 ID、固定会话串行语义和停止快速路径不得由适配器改变。

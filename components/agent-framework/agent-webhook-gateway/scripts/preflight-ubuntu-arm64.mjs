@@ -88,6 +88,35 @@ if (!existsSync(envPath)) {
 			}
 		}
 	}
+	const healthConfigurationNames = [
+		"AGENT_WEBHOOK_HEALTH_WEARER_ID",
+		"AGENT_WEBHOOK_HEALTH_MCP_URL",
+		"AGENT_WEBHOOK_HEALTH_MCP_TIMEOUT_MS",
+		"AGENT_WEBHOOK_HEALTH_RETRY_BASE_MS",
+		"AGENT_WEBHOOK_HEALTH_RETRY_MAX_MS",
+	];
+	if (healthConfigurationNames.some((name) => process.env[name] !== undefined)) {
+		requireCondition(
+			Boolean(process.env.AGENT_WEBHOOK_HEALTH_WEARER_ID?.trim()),
+			"AGENT_WEBHOOK_HEALTH_WEARER_ID is required when Health is enabled",
+		);
+		const healthMcpUrl = process.env.AGENT_WEBHOOK_HEALTH_MCP_URL?.trim();
+		requireCondition(
+			Boolean(healthMcpUrl),
+			"AGENT_WEBHOOK_HEALTH_MCP_URL is required when Health is enabled",
+		);
+		if (healthMcpUrl) {
+			try {
+				const parsedHealthMcpUrl = new URL(healthMcpUrl);
+				requireCondition(
+					parsedHealthMcpUrl.protocol === "http:" || parsedHealthMcpUrl.protocol === "https:",
+					"AGENT_WEBHOOK_HEALTH_MCP_URL must use HTTP(S)",
+				);
+			} catch {
+				failures.push("AGENT_WEBHOOK_HEALTH_MCP_URL must be an absolute HTTP(S) URL");
+			}
+		}
+	}
 }
 
 for (const requiredPath of [
