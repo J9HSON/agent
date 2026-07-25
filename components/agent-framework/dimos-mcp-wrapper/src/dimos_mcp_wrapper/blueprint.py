@@ -25,7 +25,7 @@ def build_blueprint(*, hooks: Iterable[McpCallHook] = ()):
             upstream_url=config.upstream_url,
             timeout_s=config.timeout_s,
         ),
-        WrapperMcpServer.blueprint(),
+        WrapperMcpServer.blueprint(mcp_port=config.mcp_port),
     )
 
 

@@ -1,41 +1,64 @@
 # 独立 DIMOS 机器狗 MCP
 
-`dimos-mcp` 是部署在机器狗侧主机上的独立底层 MCP。它不依赖 Agent Webhook Gateway 或 MCP 包装器运行。它公开 DiMOS `0.0.14b1` 的 14 个非停止官方工具，以及 7 个自研工具；Go2 模式组合官方空间、导航和机器人技能，但不运行模型、Agent 循环、云端 TTS 或人员跟随。
+`dimos-mcp` 是部署在机器狗侧主机上的独立底层 MCP。它不依赖 Agent Webhook
+Gateway 或 MCP 包装器运行。现在它也是产品唯一的 DimOS 组合入口：同一个 Runtime
+只加载一个 Go2 连接、一个 navigator、一个持久化 `SemanticWorld`、一个
+`MissionExecutor` 和一个 MCP Server。Go2 模式组合官方空间、导航、人员跟随和
+机器人技能，但不运行第二个 Agent 循环或云端 TTS。
 
 ```mermaid
 flowchart LR
     U["上层机器<br/>Agent / MCP wrapper / MCP Host"] -->|"HTTP MCP"| M["底层机器<br/>dimos-mcp :9990/mcp"]
     M --> C{"运行模式"}
-    C -->|"默认"| D["Dry-run motion + unavailable navigation"]
+    C -->|"默认"| D["Dry-run + replay navigator"]
     C -->|"显式启用"| G["DIMOS official Go2 spatial/navigation stack"]
+    D --> T["SemanticWorld + MissionExecutor"]
+    G --> T
     G --> R["Unitree Go2"]
 ```
 
 ## 模块接口
 
-服务固定暴露 21 个工具。完整参数与语义表见根目录 `USAGE.md`：
+服务通过显式工具 profile 区分自主产品面和人工维护面。默认 `product` 暴露
+高层任务、官方地点导航、统一停止和只读状态工具；`maintenance` 才保留原有人工调试工具。
+完整参数与语义表见根目录 `USAGE.md`：
 
 | 工具 | 参数 | 行为 |
 | --- | --- | --- |
+| `start_task` | `task_json` | 提交严格任务契约；语义地点由同一 Runtime 的 `SemanticWorld` 解析。 |
+| `get_task_status` | 无 | 查询活动或最近任务的真实执行状态。 |
+| `pause_task` / `resume_task` | `task_id` | 暂停或恢复指定任务。 |
+| `cancel_task` | `task_id` | 取消指定任务并等待 navigator 回到 idle。 |
+| `list_semantic_places` | 无 | 列出当前 map ID/version 下已确认、可解析的地点。 |
+| `confirm_semantic_place` | `place_json` | 仅保存操作者根据新鲜里程计确认的当前地点；不会自行识别或移动。 |
 | `move_forward` | `speed_mps`、`duration_s` | 按给定速度和时长前进；实机动作结束时发布零速度。 |
 | `move_backward` | `speed_mps`、`duration_s` | 按给定速度和时长后退；实机动作结束时发布零速度。 |
-| `stop_all` | 无 | 统一停止探索、巡逻、散步、持续视觉查找、导航和本地定时速度，最后尝试发布零速度。 |
+| `follow_person` | `query` | 官方 Qwen VL 初次定位人物，随后由 EdgeTAM + `VisualServoing2D` 本地持续跟随。 |
+| `stop_all` | 无 | 先取消活动 mission，再统一停止探索、巡逻、散步、官方人员跟随、导航和本地定时速度，最后尝试发布零速度。 |
 | `motion_status` | 无 | 返回本地命令执行状态，不是机器狗遥测。 |
-| 14 个 DiMOS 官方工具 | 官方 `0.0.14b1` 签名 | 管理、相对移动、设备状态、导航、探索、巡逻与感知；不包含语音、人员跟随或专项停止工具。 |
+| 17 个 DiMOS 官方工具 | 官方 `0.0.14b1` 签名 | 管理、相对移动、设备状态、导航、探索、巡逻、感知和人员跟随；不包含语音。 |
 | `return_to_start` | 无 | 返回本次下层进程捕获的第一帧有效里程计位置。 |
 | `return_to_user_and_greet` | 无 | 返回精确标记的“用户身边”，确认到达后静止 1 秒，再执行 `Hello`。 |
 | `start_stroll` | 无 | 随机选择一个局部未知分支，退休其他分支并避免回头补覆盖。 |
 
 速度和时长必须是正有限数值。当前不设置硬编码数值上限；dry-run 和 Go2 都使用同一运动状态机并拒绝重叠运动。可预期的参数或互斥错误返回 `{"status":"error","error":"..."}` 文本结果。MCP 请求返回只表示底层命令处理结果，不证明机器狗已经到达目标位置。
 
-除三个官方 MCP 管理工具和四个基础控制工具外，其余能力只有 Go2 模式会真实执行。dry-run 中完整工具仍可通过 `tools/list` 发现，但调用会返回包含 `required_mode: "go2"` 的错误。`start_patrol` 是已建图覆盖巡逻；`start_stroll` 是面向未知道路的非覆盖式随机选支散步；`begin_exploration` 才是覆盖式 Frontier 探索。
+默认 `product` profile 精确暴露任务生命周期、官方 `tag_location`、
+`navigate_with_text`、`stop_navigation`、`follow_person`、受控
+`relative_move`、统一停止和只读工具，不暴露 `move_forward`、`move_backward`、
+探索、巡逻或 sport action。
+需要人工底层调试时必须显式设置
+`DIMOS_DOG_MCP_TOOL_PROFILE=maintenance`。dry-run 使用同一 `SemanticWorld` 和
+`MissionExecutor`，但 replay navigator 不发布真实硬件命令。
 
 ## 运行要求
 
 - Python 3.10 至 3.12，推荐 Python 3.12。
 - DIMOS 固定为 `0.0.14b1`。
 - 基础安装固定使用 `dimos[web]==0.0.14b1` 和 `langchain-core==1.5.0`。后者是 DIMOS 生成 `@skill` 参数 schema 的实际运行依赖，并处于 DIMOS 声明的兼容范围内。
-- 真实 Unitree Go2 需要额外安装 `dimos[cuda,unitree]`、CUDA 12 对应的
+- 任务与语义地点模块来自同机安装的 `dimos-go2-studio==0.1.0`；本仓库开发时
+  `uv` 使用相邻 DimOS checkout 的 editable source，部署包必须同时提供这个依赖。
+- 真实 Unitree Go2 需要额外安装 `dimos[cuda,misc,perception,unitree]`、CUDA 12 对应的
   `onnxruntime==1.26.0` 与 `onnxruntime-gpu[cuda,cudnn]==1.26.0`。不能升级到
   ONNX Runtime 1.27；其 PyPI GPU wheel 已切换到 CUDA 13，与 DIMOS
   `0.0.14b1` 固定的 `cupy-cuda12x` 不兼容。
@@ -45,7 +68,11 @@ flowchart LR
 
 ## 在底层机器安装
 
-将组合仓库中的 `components/dimos-mcp` 文件夹复制到机器狗侧主机。它是独立 Python 包，不需要复制仓库中的 `packages/` 或 `components/agent-framework`。
+当前开发版要求朋友仓库与 DimOS 仓库保持本机相邻布局，因为
+`dimos-go2-studio` 通过 `tool.uv.sources` 指向
+`../../../dimos/extensions/go2-studio-agent`。不需要复制朋友仓库中的 `packages/`
+或整个 `components/agent-framework`，但不能只复制 `dimos-mcp` 一个文件夹后期待
+语义任务层仍可安装。后续发布独立 wheel 时再移除这个本地路径约束。
 
 POSIX：
 
@@ -79,7 +106,8 @@ dimos-dog-mcp
 http://127.0.0.1:9990/mcp
 ```
 
-dry-run 不连接、站立或移动真实机器狗。`move_forward` 和 `move_backward` 会返回计划参数，但不会发布非零 `cmd_vel`。
+dry-run 不连接、站立或移动真实机器狗。默认 product profile 可运行语义任务 replay，
+不会发布非零 `cmd_vel`。如需测试旧低层动作返回，显式切换 maintenance profile。
 
 ## 暴露给另一台机器
 
@@ -147,35 +175,39 @@ curl --request POST "http://192.168.66.160:9990/mcp" \
   --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 ```
 
-返回的 `tools` 必须精确包含：
+默认 `product` profile 返回的 `tools` 必须精确包含：
 
 ```text
-move_forward
-move_backward
 stop_all
 motion_status
+get_robot_summary
 server_status
 list_modules
-agent_send
-relative_move
-wait
 current_time
-execute_sport_command
 get_battery_soc
 observe
+follow_person
+relative_move
 tag_location
 navigate_with_text
-begin_exploration
-start_patrol
-look_out_for
-return_to_start
-return_to_user_and_greet
-start_stroll
+stop_navigation
+start_task
+pause_task
+resume_task
+cancel_task
+get_task_status
+list_semantic_places
+confirm_semantic_place
 ```
 
-该清单是对锁定版本 DiMOS `0.0.14b1` 的版本化契约；升级 DiMOS 时必须重新审计官方工具。
+`maintenance` profile 额外暴露锁定版 DiMOS `0.0.14b1` 的人工调试工具；升级
+DiMOS 时必须重新审计该 allowlist。
 
 ### dry-run 前进调用
+
+此例属于人工维护面，先设置
+`DIMOS_DOG_MCP_TOOL_PROFILE=maintenance` 并重启服务；默认 product profile 会拒绝
+发现或调用 `move_forward`。
 
 ```bash
 curl --request POST "http://192.168.66.160:9990/mcp" \
@@ -266,6 +298,13 @@ http://127.0.0.1:9991/mcp
 | `DIMOS_DOG_MCP_HOST` | `127.0.0.1` | DIMOS MCP HTTP 监听地址。跨机器调用时设置为 `0.0.0.0` 或指定底层 interface 地址。 |
 | `DIMOS_DOG_MCP_PORT` | `9990` | MCP TCP 端口，必须是 1 至 65535 的整数。 |
 | `DIMOS_DOG_MCP_MODE` | `dry-run` | `dry-run` 或 `go2`。只有 `go2` 会连接真实硬件。 |
+| `DIMOS_DOG_MCP_TOOL_PROFILE` | `product` | `product` 或 `maintenance`；默认只保留受控 `relative_move`，不暴露其他低层运动工具。 |
+| `DIMOS_QWEN_VL_BASE_URL` | Alibaba 默认 | 官方人员跟随首次 bbox 使用的 OpenAI-compatible API 根 URL；SiliconFlow 使用 `https://api.siliconflow.cn/v1`。 |
+| `DIMOS_QWEN_VL_MODEL` | `qwen2.5-vl-72b-instruct` | 官方人员跟随首次 bbox 的 provider model ID；当前部署使用 `Qwen/Qwen3-VL-8B-Instruct`。 |
+| `DIMOS_QWEN_VL_API_KEY` | 无 | 官方人员跟随的 provider key；只能放私有环境文件或进程环境。 |
+| `DIMOS_SEMANTIC_WORLD_PATH` | `~/.dimos/go2-studio/semantic-world.json` | 已确认语义地点的持久化 JSON。 |
+| `DIMOS_MAP_ID` | dry-run 为 `replay-map` | 当前地图稳定 ID；Go2 模式必须显式设置。 |
+| `DIMOS_MAP_VERSION` | dry-run 为 `replay-v1` | 当前地图版本；Go2 模式必须显式设置。 |
 | `ROBOT_IP` | 无 | DIMOS Go2 连接使用的机器狗地址；只在 `go2` 模式中需要。 |
 
 启动时配置非法会直接失败，不会回退到其他地址、端口或实机模式。
@@ -290,16 +329,82 @@ CPU 与 GPU wheel 都提供同名的 `onnxruntime` Python 包，因此必须让 
 ```bash
 export ROBOT_IP=<YOUR_GO2_IP>
 export DIMOS_DOG_MCP_MODE=go2
+export DIMOS_DOG_MCP_TOOL_PROFILE=product
+export DIMOS_SEMANTIC_WORLD_PATH="$HOME/.dimos/go2-studio/semantic-world.json"
+export DIMOS_MAP_ID=<CURRENT_MAP_ID>
+export DIMOS_MAP_VERSION=<CURRENT_MAP_VERSION>
+export DIMOS_PREMAP_FILE="$HOME/.dimos/go2-studio/<CURRENT_MAP>.pc2.lcm"
+export DIMOS_QWEN_VL_BASE_URL=https://api.siliconflow.cn/v1
+export DIMOS_QWEN_VL_MODEL=Qwen/Qwen3-VL-8B-Instruct
+export DIMOS_QWEN_VL_API_KEY=<PRIVATE_KEY>
 export DIMOS_DOG_MCP_HOST=0.0.0.0
 export DIMOS_DOG_MCP_PORT=9990
 dimos-dog-mcp
 ```
 
-Go2 模式复用 DiMOS 官方 `unitree_go2_spatial` Blueprint，并组合官方导航、Unitree 和感知技能。`ModuleCoordinator.build()` 完成所有官方模块启动后，入口同步通过 `GO2Connection.publish_request` 向 `rt/api/sport/request` 发送 API `1027` / `data=true`，避免导航已经产生 `cmd_vel`、但 Go2 固件静默忽略默认 `WIRELESS_CONTROLLER` 帧。响应状态码不为 `0`、结构无效或抛出异常时，进程停止全部模块并失败退出。官方 `SpeakSkill` 不组合：它会在启动阶段初始化 OpenAI TTS，而本项目由上层回复接收端完成最终用户 TTS，因此底层启动不需要 `OPENAI_API_KEY`。官方 `PersonFollowSkillContainer` 也不组合，因为其人员跟随链路要求本项目不支持的 `ALIBABA_API_KEY`；因此 `follow_person` 和 `stop_following` 不会出现在 `tools/list`。自研 `StrollSkill` 复用官方 Frontier 检测与导航，只替换为随机选支、退休旁支、拒绝回头补覆盖的目标策略。
+Stage 2 Go2 模式复用 DiMOS 官方轻量 `unitree_go2` Blueprint，并补回官方
+`SpatialMemory(new_memory=false)`、`NavigationSkillContainer` 与一个
+`PersonFollowSkillContainer`，继续组合地图、
+规划、探索/巡逻、Unitree 设备技能和本项目的语义任务层。它不加载
+`PerceiveLoopSkill` 或 `StandaloneAgentBridge`。官方地点集合会跨 Runtime 重启保留；
+`tag_location`、`navigate_with_text`、`stop_navigation` 直接进入 product 工具面。
+`ModuleCoordinator.build()` 完成所有官方模块启动后，
+入口同步通过 `GO2Connection.publish_request` 向 `rt/api/sport/request` 发送 API
+`1027` / `data=true`，避免导航已经产生 `cmd_vel`、但 Go2 固件静默忽略默认
+`WIRELESS_CONTROLLER` 帧。响应状态码不为 `0`、结构无效或抛出异常时，进程停止
+全部模块并失败退出。现有 canonical `SemanticWorld` / `MissionExecutor` 仍保留，
+不会为简单地点导航再增加一套 Planner 或 Agent 框架。
 
-`return_to_user_and_greet` 使用预先调用 `tag_location(location_name="用户身边")` 保存的固定地图点，不执行实时人员跟随。它拒绝其他近似标点，最多等待导航 100 秒；只有 `is_goal_reached()` 成功后才静止 1 秒并向官方 `UnitreeSkillContainer` 提交 `Hello`。任一步失败都不会提前问候。
+官方人员跟随只在启动时调用 Qwen VL，随后由 EdgeTAM 在本地以 20Hz 跟踪并由
+`VisualServoing2D` 直接发布速度。它明确假设路径清空，不经过 A*、不做障碍物
+避让、不自动重识别丢失目标，也不产生 canonical task 终态。product 只公开
+`follow_person`，停止统一调用 `stop_all`；官方 `stop_following` 仅保留在
+maintenance 工具面。
 
-官方 `PerceiveLoopSkill` 声明了必需的 `AgentSpec` 引用。独立底层不应为此引入官方 `McpClient`，因为它会额外创建模型和 Agent 循环。本组件改由无模型的 `StandaloneAgentBridge` 满足该引用：`look_out_for` 没有 `then` 时仍通过 MCP 工具流通知上层；设置 `then` 时，桥接器只向当前进程的本机 MCP endpoint 单次调用指定的公开工具。
+Stage 2 还要求 `DIMOS_PREMAP_FILE` 指向一份已存在的 `.pc2.lcm` 预建图。
+Runtime 加载官方 `RelocalizationModule`，把已确认地点持久化在稳定 `map` 帧；
+每次导航前再转换到当前会话的 `world` 帧。没有有效 `world -> map` 变换时，
+确认地点与地点解析均 fail-closed，不能把旧会话的里程计坐标直接当作可复用地点。
+
+Go2 的局域网信令必须绕过 HTTP 代理。Python 会读取 macOS 系统代理，即使终端没有
+显式 `HTTP_PROXY`；启动入口会把 `ROBOT_IP` 同时加入 `NO_PROXY` 和 `no_proxy`。
+当前固件若 `/con_notify` 返回 `data2=2`，不需要 `UNITREE_AES_128_KEY`；只有
+`data2=3` 的握手才需要在私有环境文件中提供该密钥。
+
+Stage 2 提供独立验收客户端，不把“任务 accepted”当成到达。先执行只读预检：
+
+```bash
+dimos-stage2-audit preflight \
+  --place 测试起点 \
+  --place 门口测试点
+```
+
+它要求唯一 Go2 product Runtime、PID 所有权一致、新鲜 odometry、已就绪的
+`world -> map` 重定位、无活动 canonical task，以及当前 map/version 上唯一匹配的
+语义地点。任何条件不满足都不会调用 `start_task`。
+
+清场并获得本轮明确授权后，每次只运行一个单程：
+
+```bash
+dimos-stage2-audit trip \
+  --destination 门口测试点 \
+  --task-id task-stage2-normal-001 \
+  --acknowledge-motion 'START GO2，场地已清空'
+```
+
+验收器不会重试运动工具；它轮询同一 task ID，记录终态、map/version、计划与真实
+轨迹快照、最终稳定坐标和到达误差。超过时限只调用一次 `cancel_task`，并把
+`navigation_idle` 写入证据。独立取消验收使用：
+
+```bash
+dimos-stage2-audit cancel-check \
+  --destination 门口测试点 \
+  --task-id task-stage2-cancel-001 \
+  --acknowledge-motion 'START GO2，场地已清空'
+```
+
+默认 JSON 证据写入 `~/.dimos/go2-stage2/evidence/`。该客户端只证明 MCP/机器人
+侧事实；Agent、Gateway 和 Studio 是否显示相同 task ID 仍须在 S2-R1 中单独核对。
 
 MCP 客户端断开不等同于取消；应显式调用统一的 `stop_all`。
 

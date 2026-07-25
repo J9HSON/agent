@@ -2,32 +2,36 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 type Environment = Readonly<Record<string, string | undefined>>;
+export type ToolProfile = "product" | "validation";
+export type AgentRuntime = "pi" | "validation";
+
+export interface AgentModelConfig {
+	provider: string;
+	modelId: string;
+	baseUrl: string;
+	apiKey: string;
+}
 
 export interface GatewayConfig {
 	host: string;
 	port: number;
 	databasePath: string;
 	replyWebhookUrl: string;
+	mapUrl: string;
 	mcpWrapperUrl: string;
 	mcpTimeoutMs: number;
 	replyTimeoutMs: number;
 	retryBaseMs: number;
 	retryMaxMs: number;
+	taskPollIntervalMs: number;
+	taskTimeoutMs: number;
 	agentCwd: string;
 	agentDir: string;
 	sessionDir: string;
 	defaultSpeedMps: number;
-	health: HealthGatewayConfig | undefined;
-}
-
-export interface HealthGatewayConfig {
-	wearerId: string;
-	keys: ReadonlyMap<string, Uint8Array>;
-	mcpCommand: string;
-	mcpArgs: readonly string[];
-	mcpTimeoutMs: number;
-	retryBaseMs: number;
-	retryMaxMs: number;
+	toolProfile: ToolProfile;
+	agentRuntime: AgentRuntime;
+	agentModel: AgentModelConfig;
 }
 
 function readPositiveNumber(environment: Environment, name: string, fallback: number): number {
@@ -68,84 +72,35 @@ function readPath(environment: Environment, name: string, fallback: string, cwd:
 	return resolve(cwd, environment[name]?.trim() || fallback);
 }
 
-function readHealthConfig(environment: Environment): HealthGatewayConfig | undefined {
-	const enabled = Object.keys(environment).some((name) => name.startsWith("AGENT_WEBHOOK_HEALTH_"));
-	if (!enabled) {
-		return undefined;
+function readToolProfile(environment: Environment): ToolProfile {
+	const value = environment.AGENT_WEBHOOK_TOOL_PROFILE?.trim().toLowerCase() || "product";
+	if (value !== "product" && value !== "validation") {
+		throw new Error("AGENT_WEBHOOK_TOOL_PROFILE must be one of: product, validation");
 	}
-	const wearerId = readRequired(environment, "AGENT_WEBHOOK_HEALTH_WEARER_ID");
-	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(wearerId)) {
-		throw new Error("AGENT_WEBHOOK_HEALTH_WEARER_ID does not match the Health MCP wearer_id contract");
-	}
-	const currentKeyId = readRequired(environment, "AGENT_WEBHOOK_HEALTH_KEY_ID");
-	const keys = new Map<string, Uint8Array>([
-		[currentKeyId, readSecret(environment, "AGENT_WEBHOOK_HEALTH_SECRET_HEX")],
-	]);
-	const previousKeyId = environment.AGENT_WEBHOOK_HEALTH_PREVIOUS_KEY_ID?.trim();
-	const previousSecret = environment.AGENT_WEBHOOK_HEALTH_PREVIOUS_SECRET_HEX;
-	if ((previousKeyId === undefined) !== (previousSecret === undefined)) {
-		throw new Error(
-			"AGENT_WEBHOOK_HEALTH_PREVIOUS_KEY_ID and AGENT_WEBHOOK_HEALTH_PREVIOUS_SECRET_HEX must be configured together",
-		);
-	}
-	if (previousKeyId && previousSecret !== undefined) {
-		if (keys.has(previousKeyId)) {
-			throw new Error("AGENT_WEBHOOK_HEALTH_PREVIOUS_KEY_ID must differ from AGENT_WEBHOOK_HEALTH_KEY_ID");
-		}
-		keys.set(previousKeyId, readSecret(environment, "AGENT_WEBHOOK_HEALTH_PREVIOUS_SECRET_HEX"));
-	}
+	return value;
+}
 
+function readAgentRuntime(environment: Environment, toolProfile: ToolProfile): AgentRuntime {
+	const value =
+		environment.AGENT_WEBHOOK_RUNTIME?.trim().toLowerCase() || (toolProfile === "validation" ? "validation" : "pi");
+	if (value !== "pi" && value !== "validation") {
+		throw new Error("AGENT_WEBHOOK_RUNTIME must be one of: pi, validation");
+	}
+	return value;
+}
+
+function readAgentModelConfig(environment: Environment): AgentModelConfig {
 	return {
-		wearerId,
-		keys,
-		mcpCommand: environment.AGENT_WEBHOOK_HEALTH_MCP_COMMAND?.trim() || "py",
-		mcpArgs: readStringArray(environment, "AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON", [
-			"-3.12",
-			"-m",
-			"smart_neckband.health_mcp",
-			"--transport",
-			"stdio",
-		]),
-		mcpTimeoutMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_MCP_TIMEOUT_MS", 10_000),
-		retryBaseMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_RETRY_BASE_MS", 1_000),
-		retryMaxMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_RETRY_MAX_MS", 60_000),
+		provider: environment.AGENT_WEBHOOK_MODEL_PROVIDER?.trim() || "siliconflow",
+		modelId: environment.AGENT_WEBHOOK_MODEL_ID?.trim() || "zai-org/GLM-5.2",
+		baseUrl: readHttpUrl(environment, "AGENT_WEBHOOK_MODEL_BASE_URL", "https://api.siliconflow.cn/v1").replace(
+			/\/$/u,
+			"",
+		),
+		apiKey:
+			environment.AGENT_WEBHOOK_MODEL_API_KEY?.trim() ||
+			"!security find-generic-password -s agent-webhook-gateway-siliconflow -w",
 	};
-}
-
-function readRequired(environment: Environment, name: string): string {
-	const value = environment[name]?.trim();
-	if (!value) {
-		throw new Error(`${name} is required`);
-	}
-	return value;
-}
-
-function readSecret(environment: Environment, name: string): Uint8Array {
-	const value = environment[name];
-	if (value === undefined || value === "") {
-		throw new Error(`${name} is required`);
-	}
-	if (!/^[0-9a-f]{64}$/u.test(value)) {
-		throw new Error(`${name} must be exactly 64 lowercase hexadecimal characters`);
-	}
-	return Buffer.from(value, "hex");
-}
-
-function readStringArray(environment: Environment, name: string, fallback: readonly string[]): readonly string[] {
-	const raw = environment[name];
-	if (raw === undefined) {
-		return fallback;
-	}
-	let value: unknown;
-	try {
-		value = JSON.parse(raw);
-	} catch {
-		throw new Error(`${name} must be a JSON array of strings`);
-	}
-	if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-		throw new Error(`${name} must be a JSON array of strings`);
-	}
-	return value;
 }
 
 export function readGatewayConfig(
@@ -155,25 +110,32 @@ export function readGatewayConfig(
 ): GatewayConfig {
 	const dataDirectory = resolve(processCwd, "data");
 	const agentCwd = readPath(environment, "AGENT_WEBHOOK_AGENT_CWD", processCwd, processCwd);
+	const toolProfile = readToolProfile(environment);
+	const port = readPort(environment);
 	return {
 		host: environment.AGENT_WEBHOOK_HOST?.trim() || "127.0.0.1",
-		port: readPort(environment),
+		port,
 		databasePath: readPath(
 			environment,
 			"AGENT_WEBHOOK_DATABASE_PATH",
 			join(dataDirectory, "agent-webhook.sqlite"),
 			processCwd,
 		),
-		replyWebhookUrl: readHttpUrl(environment, "AGENT_WEBHOOK_REPLY_URL"),
+		replyWebhookUrl: readHttpUrl(environment, "AGENT_WEBHOOK_REPLY_URL", `http://127.0.0.1:${port}/v1/ui-replies`),
+		mapUrl: readHttpUrl(environment, "AGENT_WEBHOOK_MAP_URL", "http://127.0.0.1:9878/"),
 		mcpWrapperUrl: readHttpUrl(environment, "AGENT_WEBHOOK_MCP_URL", "http://127.0.0.1:9991/mcp"),
 		mcpTimeoutMs: readPositiveNumber(environment, "AGENT_WEBHOOK_MCP_TIMEOUT_MS", 120_000),
 		replyTimeoutMs: readPositiveNumber(environment, "AGENT_WEBHOOK_REPLY_TIMEOUT_MS", 10_000),
 		retryBaseMs: readPositiveNumber(environment, "AGENT_WEBHOOK_RETRY_BASE_MS", 1_000),
 		retryMaxMs: readPositiveNumber(environment, "AGENT_WEBHOOK_RETRY_MAX_MS", 60_000),
+		taskPollIntervalMs: readPositiveNumber(environment, "AGENT_WEBHOOK_TASK_POLL_INTERVAL_MS", 500),
+		taskTimeoutMs: readPositiveNumber(environment, "AGENT_WEBHOOK_TASK_TIMEOUT_MS", 330_000),
 		agentCwd,
 		agentDir: readPath(environment, "AGENT_WEBHOOK_AGENT_DIR", join(userHome, ".pi", "agent"), processCwd),
 		sessionDir: readPath(environment, "AGENT_WEBHOOK_SESSION_DIR", join(dataDirectory, "agent-session"), processCwd),
 		defaultSpeedMps: readPositiveNumber(environment, "AGENT_WEBHOOK_DEFAULT_SPEED_MPS", 0.1),
-		health: readHealthConfig(environment),
+		toolProfile,
+		agentRuntime: readAgentRuntime(environment, toolProfile),
+		agentModel: readAgentModelConfig(environment),
 	};
 }

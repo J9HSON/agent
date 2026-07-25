@@ -1,16 +1,33 @@
 # Agent Webhook Gateway
 
-该服务实现固定 Pi Agent 会话的持久化输入网关和输出投递器，并可选实现智能项圈 Health MCP v0.2 的独立消费端。输入端只提交用户文本；Agent 通过 `dimos-mcp-wrapper` 使用 DiMOS `0.0.14b1` 的 14 个非停止官方工具和 7 个自研工具；回复接收端只收到完整的最终用户可见文本，并可在上层进行 TTS。Health 通知使用独立验签、表、队列和 stdio MCP client，不进入 Agent，也不触发物理动作。
+该服务实现持久化输入网关、任务绑定和输出投递器。`product` 模式中的 Pi session
+没有 MCP 或 coding tools，只把自然语言编译为四种严格参数：
+`go_to_place`、`mark_place`、有限 `visit_route` 或 `follow_person`。
+单地点和路线的每一段都复用既有 canonical `go_to_place` 任务；Gateway 生成稳定
+task ID，持久化 `instruction_id -> task_id` 及路线进度，经
+`dimos-mcp-wrapper` 提交并监听终态。标点读取已有 `get_robot_summary` 的 fresh
+稳定坐标并写入现有 `SemanticWorld`；跟随请求直接启动 DimOS 官方
+`follow_person`，不伪装成 canonical task。
+精确的停止、暂停、继续、取消、状态和小步方向输入走同一个持久化优先队列，
+不经过模型；方向输入只调用现有 `stop_all -> relative_move`。
+Gateway 同源提供一个本地 Agent Console：左侧只读嵌入同一 DimOS Runtime 的官方
+Rerun web viewer，右侧提交文字并读取已持久化的 instruction/task/reply 状态。
+该页面不连接 Go2、不保存地图、不拥有任务状态，也不调用 MCP。
+`validation` 模式保留不依赖模型 API 的确定性 Stage 1 Agent。product Pi session
+显式使用可配置的 OpenAI-compatible provider；当前默认是 SiliconFlow
+`zai-org/GLM-5.2`，不再继承用户 Pi 的当前模型。回复接收端只收到完整终态文本。
 
 ```mermaid
 flowchart LR
-    I["输入端"] -->|"POST /v1/instructions"| G["Agent Webhook Gateway"]
+    I["Agent Console / 其他输入端"] -->|"POST /v1/instructions"| G["Agent Webhook Gateway"]
+    V["官方 Rerun Viewer :9878"] -->|"只读 iframe"| I
     G --> Q["SQLite inbox/outbox"]
-    Q --> A["固定 Pi Agent 会话"]
-    A --> W["dimos-mcp-wrapper :9991/mcp"]
+    Q --> A["Pi 参数编译器<br/>无工具"]
+    A --> T["Gateway TaskSpec + task binding"]
+    T --> W["dimos-mcp-wrapper :9991/mcp"]
+    Q -->|"精确优先输入"| P["现有任务控制 / relative_move"]
+    P --> W
     G -->|"agent.reply.completed"| R["回复接收端"]
-    H["智能项圈"] -->|"signed /v1/health-events"| G
-    G -->|"stdio Health MCP"| M["smart-neckband Health MCP"]
 ```
 
 ## 安装
@@ -36,7 +53,22 @@ npm run build
 npm run start
 ```
 
-`.env` 会被 Git 忽略。至少设置 `AGENT_WEBHOOK_REPLY_URL`；远程联调时还应将 `AGENT_WEBHOOK_MCP_URL` 指向远程 `dimos-mcp-wrapper` 的 `:9991/mcp`，不要直接连接 `dimos-dog-mcp`。`npm run start:dev` 使用同一 `.env` 直接运行 TypeScript 入口，适合本地调试。
+`.env` 会被 Git 忽略。默认回复目标是 Gateway 自己的
+`/v1/ui-replies`，因此本机 Agent Console 不再要求额外回复接收器；需要向外部设备
+推送时再设置 `AGENT_WEBHOOK_REPLY_URL`。远程联调时还应将
+`AGENT_WEBHOOK_MCP_URL` 指向远程 `dimos-mcp-wrapper` 的 `:9991/mcp`，不要直接
+连接 `dimos-dog-mcp`。`npm run start:dev` 使用同一 `.env` 直接运行 TypeScript
+入口，适合本地调试。
+
+启动后只打开一个前台：
+
+```text
+http://127.0.0.1:8080/
+```
+
+页面左侧默认读取 `http://127.0.0.1:9878/`。Product Runtime 必须设置
+`VIEWER=rerun`、`RERUN_OPEN=none`、`RERUN_WEB=true`；这样只启动同一个
+RerunBridge 的 web viewer 服务，不会自动再开浏览器标签页或第二个机器人 Runtime。
 
 默认输入端点为：
 
@@ -46,48 +78,112 @@ POST http://127.0.0.1:8080/v1/instructions
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `AGENT_WEBHOOK_REPLY_URL` | 无 | 回复接收端的部署级 HTTP(S) 回调 URL，必填。 |
+| `AGENT_WEBHOOK_REPLY_URL` | `http://127.0.0.1:<Gateway端口>/v1/ui-replies` | 可选外部回复回调；省略时由本地 Console 确认已持久化回复。 |
+| `AGENT_WEBHOOK_MAP_URL` | `http://127.0.0.1:9878/` | 同一 Product Runtime 的官方只读 Rerun web viewer。 |
 | `AGENT_WEBHOOK_HOST` | `127.0.0.1` | 输入网关监听地址。 |
 | `AGENT_WEBHOOK_PORT` | `8080` | 输入网关监听端口。 |
 | `AGENT_WEBHOOK_DATABASE_PATH` | `<cwd>/data/agent-webhook.sqlite` | 持久化 inbox/outbox 的 SQLite 文件。 |
 | `AGENT_WEBHOOK_MCP_URL` | `http://127.0.0.1:9991/mcp` | `dimos-mcp-wrapper` 的 HTTP MCP URL。 |
-| `AGENT_WEBHOOK_MCP_TIMEOUT_MS` | `120000` | 单次 MCP 请求超时；默认覆盖返航问候工具最长 100 秒导航、1 秒静止窗口和调用开销。运动工具不会自动重试。 |
+| `AGENT_WEBHOOK_MCP_TIMEOUT_MS` | `120000` | 单次 MCP 请求超时；`start_task` 不会自动重试。 |
+| `AGENT_WEBHOOK_TASK_POLL_INTERVAL_MS` | `500` | `get_task_status` 轮询间隔。 |
+| `AGENT_WEBHOOK_TASK_TIMEOUT_MS` | `330000` | 等待任务终态的总时限。 |
 | `AGENT_WEBHOOK_REPLY_TIMEOUT_MS` | `10000` | 单次回复回调超时。 |
 | `AGENT_WEBHOOK_RETRY_BASE_MS` | `1000` | 回复回调失败后的重投等待时间。 |
 | `AGENT_WEBHOOK_RETRY_MAX_MS` | `60000` | 回复重投等待时间的上限。 |
 | `AGENT_WEBHOOK_AGENT_CWD` | 当前目录 | 固定 Agent 会话的工作目录。 |
 | `AGENT_WEBHOOK_AGENT_DIR` | `~/.pi/agent` | Pi 模型、认证和设置目录。 |
 | `AGENT_WEBHOOK_SESSION_DIR` | `<cwd>/data/agent-session` | 固定 Agent 会话的持久化目录。 |
-| `AGENT_WEBHOOK_DEFAULT_SPEED_MPS` | `0.1` | 用户只给距离时用于估算时长的部署标定速度。 |
-| `AGENT_WEBHOOK_HEALTH_WEARER_ID` | 无 | 设置后启用 Health；单实例 wearer ID。 |
-| `AGENT_WEBHOOK_HEALTH_KEY_ID` | 无 | Health 当前 HMAC key ID。 |
-| `AGENT_WEBHOOK_HEALTH_SECRET_HEX` | 无 | Health 当前 32-byte secret 的 64 位小写十六进制编码。 |
-| `AGENT_WEBHOOK_HEALTH_PREVIOUS_KEY_ID` / `AGENT_WEBHOOK_HEALTH_PREVIOUS_SECRET_HEX` | 无 | 可选的前一个轮换 key；必须成对配置。 |
-| `AGENT_WEBHOOK_HEALTH_MCP_COMMAND` | `py` | 上游 stdio Health MCP 可执行文件。 |
-| `AGENT_WEBHOOK_HEALTH_MCP_ARGS_JSON` | `["-3.12","-m","smart_neckband.health_mcp","--transport","stdio"]` | 不经过 shell 的参数数组。 |
-| `AGENT_WEBHOOK_HEALTH_MCP_TIMEOUT_MS` | `10000` | Health MCP initialize/tools call 超时。 |
+| `AGENT_WEBHOOK_DEFAULT_SPEED_MPS` | `0.1` | 仅 Stage 1 validation Pi 运行时使用；product 参数编译器忽略。 |
+| `AGENT_WEBHOOK_TOOL_PROFILE` | `product` | `product` 或 `validation`；必须与 Wrapper profile 一致。 |
+| `AGENT_WEBHOOK_RUNTIME` | 按 profile | product 默认 `pi`；validation 默认 `validation`，也可显式设置。 |
+| `AGENT_WEBHOOK_MODEL_PROVIDER` | `siliconflow` | product Pi session 使用的 provider ID。 |
+| `AGENT_WEBHOOK_MODEL_ID` | `zai-org/GLM-5.2` | product Pi session 的文本模型；不用于 Stage 3 视觉验证。 |
+| `AGENT_WEBHOOK_MODEL_BASE_URL` | `https://api.siliconflow.cn/v1` | OpenAI-compatible API 根 URL。 |
+| `AGENT_WEBHOOK_MODEL_API_KEY` | macOS Keychain | 可选明文环境变量覆盖；不得写入仓库。 |
 
-普通 instruction/reply MVP 没有身份校验、签名或重放防护，只能部署在受信任网络。可选 Health endpoint 使用 raw-body HMAC、`±300` 秒时间戳和当前/前一 key rotation，但非 loopback 部署仍需 TLS 和网络访问控制。
+普通 instruction/reply MVP 没有身份校验、签名或重放防护，只能部署在受信任网络。
+
+Console 的“停止当前任务”仍提交精确文本“停”，复用 Gateway 的持久化优先路径；
+它不会从浏览器直接调用 MCP。`202 Accepted`、地图可见或按钮已点击均不代表真实
+动作完成，最终状态来自 Gateway 持久化的 canonical task snapshot 和回复。
+
+macOS 默认从专用 Keychain 条目读取模型密钥：
+
+```bash
+read -r -s siliconflow_key
+security add-generic-password -U \
+  -a siliconflow \
+  -s agent-webhook-gateway-siliconflow \
+  -w "$siliconflow_key"
+unset siliconflow_key
+```
+
+模型 provider、ID 和 URL 由 Gateway 显式注入 Pi session；`ValidationUserTextAgent`
+仍是无模型规则运行时。更换主模型不改变视觉 verifier，也不改变机器狗 MCP、
+导航或任务状态机。
+
+Stage 1 无模型启动示例：
+
+```bash
+export AGENT_WEBHOOK_TOOL_PROFILE=validation
+export AGENT_WEBHOOK_RUNTIME=validation
+export AGENT_WEBHOOK_MCP_URL=http://127.0.0.1:9991/mcp
+node dist/cli.js
+```
+
+该验证 Agent 只接受不超过 1 米的前进、回到起点、状态/轨迹查询和停止。MCP 的
+`accepted` 或 `Navigation goal reached` 文本不作为物理完成证据；必须检查
+`get_robot_summary` 的 fresh odometry 和实际位移。
 
 ## 行为
 
 - 输入 JSON 只能包含非空的 `instruction_id` 和 `text`。
 - 新事件和相同文本的幂等重投返回 `202`；同一 ID 对应不同文本返回 `409`。
-- 普通事件按 SQLite 受理顺序串行进入一个固定 Agent 会话。
-- “停”或 `stop` 的精确规范化匹配绕过 Agent，单次调用 `stop_all`。
-- 固定 Agent 明确拒绝 `Bound` 以及任何前空翻、后空翻、侧空翻、连续空翻或其他 `flip` / `somersault` 动作；它不会为这些请求调用 `execute_sport_command` 或其他运动工具，也不会改写成替代动作。
-- 具名目的地使用 `navigate_with_text`；未知区域覆盖探索、已建图覆盖巡逻和非覆盖式人类散步分别使用 `begin_exploration`、`start_patrol`、`start_stroll`。
-- “回到用户身边并打招呼”使用单个 `return_to_user_and_greet`；调用前必须已将目标点标记为“用户身边”，底层确认到达后静止 1 秒再执行 `Hello`，Agent 不拆分为多个工具调用。
-- `stop_all` 由底层统一尝试停止定时速度、定点导航、探索、巡逻、散步和持续视觉查找；Agent 和快速路径都不再调用专项停止工具。
-- Agent 或停止调用失败时仍产生普通回复事件，文本固定为“暂时无法完成此请求，请稍后重试。”。
+- product 普通事件按 SQLite 受理顺序进入无工具 Pi 参数编译器；只接受
+  `go_to_place + destination`、`mark_place + name`、有限
+  `visit_route + waypoints + repeat_count`，或无额外字段的 `follow_person`。
+- `mark_place` 只在 odometry fresh，且所需重定位 ready 时，将当前稳定位姿经
+  `confirm_semantic_place` 写入现有 `SemanticWorld`。它不调用官方
+  `tag_location`，避免同时维护两份 Agent 地点真相。
+- `visit_route` 先用 `list_semantic_places` 校验当前 map ID/version 和全部地点/
+  别名，再按有限次数依次提交现有 `go_to_place`。每段都有确定性 task ID；只有
+  当前段 completed 后才进入下一段。
+- `follow_person` 固定请求“启动时画面中央的人”，只有官方返回
+  `Starting to follow` 才回复已开始；它不创建 task binding，也没有 canonical
+  terminal snapshot。
+- Gateway 从 `instruction_id` 确定性生成 task ID；模型不能提供或覆盖 task ID、
+  UTC 时间、priority 或任务状态。
+- `start_task` accepted、queued、navigating 或 recovering 都不会产生完成回复。
+  只有同一 task ID 进入 completed/failed/cancelled 且 `active=false` 后才创建
+  outbox 事件。
+- “停/停下来/停止/马上停/别动”或 `stop/stop now` 的全句规范化匹配绕过
+  Agent，单次调用 `stop_all`；“别停”“停一下再前进”等复合或否定句不会误命中。
+- “暂停/继续/取消任务”复用当前 task ID 调用现有 lifecycle tools；“状态”聚合
+  `get_task_status`、`get_robot_summary` 和 `list_semantic_places`。
+- “前进/往前走/向前移动”等六类前后左右与转向口语，在去除有限礼貌外壳后做
+  全句锚定匹配，绕过模型，先 `stop_all`，再调用现有 `relative_move`。平移固定
+  为 0.2 m，旋转固定为 15°；“往前走到门口”“不要往前走”“往前走 2 米”不会
+  被当成小步动作。回复只表示工具调用结果，不替代 fresh odometry 证据。
+- product 编译器没有低层运动、`navigate_with_text`、exploration、patrol 或 sport
+  tools；地点任务不能绕过 `MissionExecutor`。只有上述确定性小步输入由 Gateway
+  固定调用 `relative_move`，模型不能选择参数。另一个例外是明确的
+  `follow_person`，它直接启动官方 DimOS 后台技能。Stage 1 validation profile
+  仍只注册五个验收工具。
+- `stop_all` 由底层统一尝试停止定时速度、定点导航、探索、巡逻、散步和官方人员跟随；Agent 和快速路径都不再调用专项停止工具。
+- MCP 调用使用稳定错误分类区分 Wrapper/Runtime 不可用、超时、协议异常和 Runtime
+  拒绝；前台显示脱敏后的可操作提示。超时只表示结果未知，明确要求先查状态且不要
+  重复发送。其他未分类错误仍使用固定失败回复。
 - outbox 先持久化再回调。回调失败只重投同一 `reply_id`，不会重跑 Agent 或 MCP 工具。
-- 进程启动时若发现上次运行中断在 `processing` 状态，会生成固定失败回复而不重跑该事件，避免重复机器狗副作用。
-- Health 通知在独立 SQLite 表和 queue 中按 raw-body digest 原子去重，ACK 后查询权威 Health MCP。
-- Health worker 固定检查 contract、revision、wearer/source、live/test/freshness；通过时只记录 `verified_no_action`，不会调用 Agent 或机器狗 MCP。
+- 进程启动时，状态为 submitted/monitoring 的 binding 只恢复
+  `get_task_status`；崩溃在首次提交前的 compiled binding 会用同一确定性 task ID
+  恢复提交。路线只续跑当前段和剩余段，不重跑已完成段。没有 binding 的旧中断
+  指令 fail-closed 为固定失败回复。
 
-`Bound` 与所有空翻的禁用当前属于固定 Agent 的系统提示词约束，不是程序级工具调用门。直接连接 MCP 的其他 Host 仍可调用通用的 `execute_sport_command`；需要确定性禁止时，必须在下层增加可测试的命令策略。
+直接连接 maintenance MCP 的其他 Host 仍可能调用通用运动工具；product Gateway
+的无工具编译器和 product Wrapper allowlist 不等同于底层维护面的全局权限系统。
+本阶段只实现统一文本输入和协调，不接入戒指、眼镜、ASR 或真实机器狗。
 
-普通 HTTP schema 见 `docs/agent-input-webhook-integration.md`；Health 配置、header、ACK 和错误映射见 `docs/health-mcp-consumer-integration.md`。
+普通 HTTP schema 见 `docs/agent-input-webhook-integration.md`。
 
 ## 开发
 
@@ -104,7 +200,9 @@ npm run check
 npm run demo:dry-run
 ```
 
-该命令使用临时端口和临时 SQLite 数据库启动真实网关核心，并在进程内替身化固定 Agent、`dimos-mcp-wrapper`、`dimos-dog-mcp` 和回复接收端。演示提交一条定时前进指令，在 Agent 仍被阻塞时再提交 `STOP`，并自动断言：
+该命令保留 Stage 1 validation 回归：使用临时端口和临时 SQLite 数据库启动真实
+网关核心，并在进程内替身化 validation Agent、Wrapper、底层 MCP 和回复接收端。
+它提交一条定时前进指令，在 Agent 仍被阻塞时再提交 `STOP`，并自动断言：
 
 - 两条指令都收到完整的 `agent.reply.completed` 回调，且停止回调先返回；
 - `move_forward` 和 `stop_all` 在包装器及底层替身中各调用一次，参数原样转发；
@@ -112,29 +210,10 @@ npm run demo:dry-run
 
 成功时进程输出 `dry-run e2e passed` 和调用摘要，随后删除临时数据库。`npm test` 会自动执行同一场景。
 
-### Health MCP 跨仓库联调
-
-准备好 `smart-neckband` Health 功能分支的 Python 3.12 虚拟环境后，可在不启动模型、DIMOS、真实机器狗、采集设备或人体连接的情况下运行：
-
-```powershell
-$env:SMART_NECKBAND_HEALTH_ROOT = "C:/absolute/path/to/smart-neckband-health-worktree"
-$env:SMART_NECKBAND_HEALTH_PYTHON = "$env:SMART_NECKBAND_HEALTH_ROOT/pc_app/.venv/Scripts/python.exe"
-npm run demo:health-cross-repo
-```
-
-该命令使用临时端口、临时上游 Health SQLite、临时 Gateway SQLite 和公开测试密钥，运行真实的上游 Health store、Webhook sender、Pi Health receiver、durable queue 与上游 stdio MCP。它覆盖 `INT-001..010`、`INT-016`、`INT-017` 和 `INT-020` 的当前可自动化子集，并断言：
-
-- 首次投递为 `202 accepted`，权威 event/state 查询终态为 `verified_no_action`；
-- duplicate、raw-body conflict、错误签名、过期时间戳、Header/body ID、Schema、replay 和 event mismatch 均按契约处理；
-- 五路并发恰好一个 `accepted`、四个 `duplicate`；
-- current/previous key 可接受，未知 key 被拒绝；
-- Agent、DIMOS 和 robot 调用计数均为 0。
-
-该演示不替代 `INT-011..015`、`INT-018/019` 的故障/重启注入，也不等同于完整双方验收。成功时输出 `health cross-repo integration passed` 和不含 secret、签名或健康原始数据的摘要，并删除全部临时数据库。
-
 主要扩展边界：
 
 - 新的用户文本运行时实现 `UserTextAgent`；
+- 新的 product 任务编译器实现 `TaskParameterCompiler`，不得持有 MCP 工具；
 - 新的 MCP 传输实现 `McpToolCaller`；
 - 新的回复传输实现 `ReplyEventDelivery`；
 - Webhook schema、稳定 ID、固定会话串行语义和 outbox 不得由适配器改变。

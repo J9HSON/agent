@@ -1,16 +1,18 @@
 # Agent 输入与最终回复 Webhook 开发对接指南
 
-> 文档版本：MVP v0.1
+> 文档版本：Stage 2 v0.3
 >
 > 实现位置：`components/agent-framework/agent-webhook-gateway`
 >
-> 当前状态：源代码、单元测试和 TypeScript 类型检查已经完成；目标环境部署、真实模型、真实 MCP 包装器、机器狗 MCP 和回复接收端的端到端联调尚未完成。
+> 当前状态：`go_to_place`、`mark_place`、有限 `visit_route`、任务控制、小步方向
+> 输入及官方 `follow_person` 已在既有 Gateway 中实现并通过 fake-MCP 软件测试；
+> 本次没有连接或移动 Go2。
 >
 > 适用对象：提交真实用户文本的输入端开发者、接收 Agent 最终回复的回复接收端开发者，以及负责部署和扩展网关的 Agent 侧开发者。
 
-本文描述的是当前项目已经存在的实现，不是未来设计草案。任何接入方都应以本文定义的 HTTP 契约为准，同时注意本文明确列出的模型行为边界和尚未实现能力。
-
-本文只定义普通用户文本和最终回复。智能项圈的独立 `/v1/health-events`、HMAC、durable health queue 和只读 Health MCP 消费流程见 [Health MCP v0.2 消费端对接指南](health-mcp-consumer-integration.md)；健康通知不得复用本接口。
+本文描述的是当前项目已经存在的实现，不是未来设计草案。产品模式允许标记当前
+位置、前往已知语义地点、执行有限命名路线及启动官方人员跟随。模型仍没有工具；
+精确任务控制和小步方向由 Gateway 固定调用既有工具。
 
 开始开发前，还应阅读：
 
@@ -29,13 +31,20 @@
 2. 使用 Node.js 原生 SQLite 将输入先写入 inbox，再返回 `202 Accepted`。
 3. 对相同 `instruction_id` 和相同 `text` 的重投做幂等去重。
 4. 拒绝相同 `instruction_id` 对应不同 `text` 的冲突请求。
-5. 将普通输入按持久化受理顺序串行交给一个固定 Pi Agent 会话。
-6. 只向该 Agent 暴露固定的 21 个机器狗 MCP 工具，并关闭 Pi 内建编码工具。
-7. 将规范化后精确等于“停”或 `stop` 的文本作为停止快速路径处理。
-8. 将 Agent 最终回复或固定失败文本持久化到 outbox。
-9. 通过部署级回复 Webhook 发送完整的最终用户可见文本。
-10. 对回复回调失败进行持久化重试，不重新运行 Agent，也不重复 MCP 工具调用。
-11. 进程恢复时避免重新执行已经进入 `processing` 状态的输入。
+5. 将普通输入按持久化受理顺序串行交给一个无工具的固定 Pi 参数编译会话。
+6. 严格接受 `go_to_place`、`mark_place`、有限 `visit_route` 或
+   `follow_person` 参数。单地点和每个路线段由 Gateway 生成完整 `TaskSpec`；
+   跟随直接调用官方后台技能，不创建 task binding。
+7. 将精确停止、暂停、继续、取消、状态和六个小步方向文本作为优先路径处理。
+8. 将 `instruction_id -> task_id -> TaskSpec` 及有限路线进度持久化到 SQLite。
+9. 单地点和每个路线段的确定性 task ID 最多提交一次，随后轮询
+   `get_task_status`；路线只在上一段 completed 后进入下一段。
+10. 只有同一任务进入终态并且 `active=false` 后，才生成最终用户回复。
+11. 重启时对 submitted/monitoring binding 恢复状态监听；对尚未提交的 compiled
+    binding 使用同一 task ID 恢复提交；路线不重跑已完成段。
+12. 将终态回复或固定失败文本持久化到 outbox。
+13. 通过部署级回复 Webhook 发送完整的最终用户可见文本。
+14. 对回复回调失败进行持久化重试，不重新编译任务或重复 MCP 调用。
 
 ### 1.2 当前没有实现
 
@@ -51,9 +60,12 @@
 - WebSocket、SSE 或 token 流式输出。
 - 回复投递最大重试次数、死信队列或自动过期清理。
 - 多个网关实例共享同一数据库和会话目录的高可用协调机制。
-- 对自然语言运动意图进行确定性的程序级解析或拦截。
+- 无限循环路线、任意任务图或用户自定义 MissionKind。
+- 自然语言自由低层运动、探索、巡逻、运动表演或任意工具选择。只有精确六方向
+  固定为 0.2 m / 15° 小步。
 - 对模型最终文本进行内容过滤、敏感信息清洗或二次审核。
-- 独立物理急停、机器狗遥测、定位或到达确认。
+- 独立物理急停。
+- 在 Gateway 内部直接判断里程计到达；到达证据由下游 `MissionExecutor` 返回并校验。
 
 ## 2. 保证层级
 
@@ -61,15 +73,15 @@
 
 | 层级 | 含义 | 当前示例 |
 | --- | --- | --- |
-| 程序级保证 | 由 HTTP 校验、SQLite 状态、队列或固定代码路径强制执行。 | 严格请求字段、64 KiB 请求体上限、ID 幂等、普通输入串行、停止快速路径、固定失败回复、outbox 重投。 |
-| 模型提示词策略 | 系统提示词要求模型遵守，但当前没有确定性策略引擎在工具调用前再次拦截。 | 运动参数不完整时追问、默认向前、距离换算、拒绝左右转向、不宣称精确到达、最终回复直接面向用户。 |
-| 部署和联调责任 | 依赖目标环境、模型配置、网络、MCP 服务和回复接收端共同满足。 | 模型可用、包装器可访问、真实机器狗执行、回调 URL 可达、输入端和回复端持久化。 |
+| 程序级保证 | 由 HTTP 校验、SQLite 状态、队列或固定代码路径强制执行。 | 严格输入、稳定 task ID、有限路线进度、终态且 inactive 才回复、优先控制、outbox 重投。 |
+| 模型参数编译 | 模型只把自然语言缩减为受限参数；没有任何工具权限。 | 输出 `go_to_place`、`mark_place`、有限 `visit_route` 或 `follow_person`；其输出由严格 JSON/schema 校验。 |
+| 部署和联调责任 | 依赖目标环境、模型配置、网络、MCP 服务和回复接收端共同满足。 | 模型可用、语义地点已建、包装器可访问、真实导航完成、回调 URL 可达。 |
 
 因此：
 
 - 本文写明“网关拒绝”“网关只调用一次”“网关持久化”等内容时，表示程序级行为。
-- 本文写明“Agent 应当”“模型被要求”等内容时，表示当前系统提示词策略，不是确定性的自然语言安全策略。
-- 如果业务要求“参数不完整时在任何模型行为下都绝不能调用运动工具”，必须新增程序级运动意图解析或工具调用前策略门。目前项目没有这个保证。
+- 模型输出错误、额外字段、未知任务类型或空地点时，网关 fail-closed，不会提交任务。
+- 模型不能指定 task ID、时间、优先级、任务状态或 MCP 工具。
 
 ## 3. 系统边界与数据流
 
@@ -77,11 +89,12 @@
 flowchart LR
     I["输入端<br/>确认完整真实用户请求"] -->|"POST /v1/instructions"| G["Agent Webhook Gateway"]
     G --> Q["SQLite inbox"]
-    Q -->|"普通输入 FIFO"| A["固定 Pi Agent 会话"]
-    Q -->|"精确停止口令快速路径"| S["stop_all 调用"]
-    A -->|"HTTP JSON-RPC tools/call"| W["DIMOS MCP wrapper :9991/mcp"]
+    Q -->|"普通输入 FIFO"| A["Pi 参数编译器<br/>无工具"]
+    Q -->|"精确优先输入"| S["任务控制 / 状态 / stop_all → relative_move"]
+    A --> C["Gateway 构造 TaskSpec<br/>持久化 task binding"]
+    C -->|"start_task 一次<br/>get_task_status 轮询"| W["DIMOS MCP wrapper :9991/mcp"]
     S -->|"HTTP JSON-RPC tools/call"| W
-    W --> D["机器狗 MCP :9990/mcp"]
+    W --> D["机器狗 MCP + MissionExecutor :9990/mcp"]
     G --> O["SQLite outbox"]
     O -->|"POST agent.reply.completed"| R["回复接收端"]
 ```
@@ -91,10 +104,10 @@ flowchart LR
 | 组件 | 当前职责 | 不负责 |
 | --- | --- | --- |
 | 输入端 | 麦克风、唤醒、ASR、分段、确认一次完整真实请求、生成并持久化 `instruction_id`、提交和重试。 | 不直接调用 MCP，不指定 Agent 会话，不解释 `202` 为动作成功。 |
-| Agent Webhook Gateway | HTTP 校验、inbox/outbox、幂等、调度、固定 Agent 会话、停止快速路径和回复重投。 | 不采集音频，不判断一次 Webhook 是否是真实请求，不提供认证，不提供物理急停。 |
-| 固定 Pi Agent | 接收普通用户文本，根据系统提示词选择最终回复和 MCP 工具调用。 | 不接收外部会话 ID，不启用 Pi 内建编码工具、skills、extensions 或 context files。 |
-| MCP 包装器 | 将 DiMOS `0.0.14b1` 的 14 个非停止官方工具和 7 个自研工具单次转发到机器狗 MCP，并执行旁路生命周期 hook。 | 不接收用户自然语言，不重复运动命令，不承担 Webhook 回复投递。 |
-| 机器狗 MCP | 暴露版本化的 21 工具契约，验证自研运动参数，并在 dry-run 或 Go2 模式执行官方能力、导航扩展和统一停止编排。 | 不生成用户回复，不接收 `instruction_id`，不运行 OpenAI TTS 或需要 `ALIBABA_API_KEY` 的人员跟随。 |
+| Agent Webhook Gateway | HTTP 校验、inbox/outbox、幂等、无工具参数编译、TaskSpec、有限路线、优先控制、终态监听和回复重投。 | 不采集音频，不提供认证，不拥有地图/导航，不提供物理急停。 |
+| Pi 参数编译器 | 只把用户文本编译为四种严格参数。 | 不持有 MCP/coding 工具，不生成 task ID/位移参数，不判断任务完成。 |
+| MCP 包装器 | 产品模式转发 20 个任务、地点、受控相对位移、状态、停止和只读工具，并执行旁路生命周期 hook。 | 不接收用户自然语言，不重复任务提交，不承担回复投递。 |
+| 机器狗 MCP | 持有唯一 `MissionExecutor`、`SemanticWorld`、导航器和 Go2 连接；解析语义地点并执行任务状态机。 | 不生成用户回复，不接收 `instruction_id`。 |
 | 回复接收端 | 持久化并按 `reply_id` 去重，向最终用户显示或通过 TTS 朗读 `text`。 | 不期待模型 token、工具结果、内部错误或独立失败事件。 |
 
 ## 4. 输入端 HTTP 契约
@@ -132,7 +145,7 @@ http://127.0.0.1:8080/v1/instructions
 ```json
 {
   "instruction_id": "6cfbbfbc-7ec5-4c47-a326-b3e2d563a43d",
-  "text": "请让机器狗向前走 1 米"
+  "text": "请去演示点"
 }
 ```
 
@@ -265,7 +278,7 @@ Content-Type: application/json; charset=utf-8
 - 自增受理顺序 `sequence`
 - 唯一 `instruction_id`
 - 原始 `text`
-- 是否为停止快速路径
+- 是否为精确优先控制路径
 - `pending`、`processing` 或 `completed` 状态
 - UTC 接收时间
 
@@ -277,18 +290,24 @@ HTTP `202` 只会在 `acceptInstruction` 完成后发送。
 
 1. 从最早的 `pending` 普通输入中领取一条。
 2. 将其状态改为 `processing`。
-3. 将原始 `text` 交给固定 Pi Agent 会话。
-4. 等待该轮 Agent 完成。
-5. 将最终回复写入 outbox，并将输入标记为 `completed`。
-6. 再领取下一条普通输入。
+3. 将原始 `text` 交给固定 Pi 参数编译器。
+4. 严格校验参数。标点读取现有稳定 pose；单地点和路线段由 Gateway 生成稳定
+   task ID 和完整 `TaskSpec`。
+5. 在任何下游提交前持久化 task binding；路线同时保存有限 waypoints、轮数和
+   当前段索引。
+6. 单地点或当前路线段调用一次 `start_task`。
+7. 轮询 `get_task_status`；accepted、queued、navigating 等中间态不产生回复。
+8. 路线段 completed 后才生成下一段不同 task ID；失败/取消立即结束整条路线。
+9. 最终任务进入 completed/failed/cancelled 且 `active=false` 后生成固定回复。
+10. 将回复写入 outbox，并将输入标记为 `completed`，再领取下一条普通输入。
 
-因此，一个网关进程内同时只处理一个普通 Agent 回合。
+因此，一个网关进程内同时只编译和监听一个普通任务。Gateway 不把“任务已受理”误报为“已经到达”。
 
 这不表示回复 Webhook 必然按输入顺序成功到达。回调失败、重试和接收端网络状态可能改变实际到达顺序，回复端必须使用 ID 关联。
 
-### 5.3 固定 Pi Agent 会话
+### 5.3 固定 Pi 参数编译会话
 
-当前部署只创建一个 Pi Agent 会话：
+产品模式只创建一个 Pi 会话：
 
 - 使用 `AGENT_WEBHOOK_AGENT_CWD` 作为 Agent 工作目录。
 - 使用 `AGENT_WEBHOOK_AGENT_DIR` 读取 Pi 的模型、认证和设置。
@@ -296,7 +315,7 @@ HTTP `202` 只会在 `acceptInstruction` 完成后发送。
 - 启动时通过 `SessionManager.continueRecent` 继续该目录下最近的会话。
 - 外部请求不能指定、切换或重置会话。
 
-当前 Agent 资源加载器明确关闭：
+资源加载器明确关闭：
 
 - Pi extensions
 - skills
@@ -304,62 +323,64 @@ HTTP `202` 只会在 `acceptInstruction` 完成后发送。
 - themes
 - context files
 - Pi 内建编码工具
+- 所有 MCP 工具
 
-当前只注册并保持激活以下 21 个自定义工具。它们全部向包装器发送一次同名 `tools/call`：
+当前模型只允许输出以下四种结构：
 
-| 工具 | 参数 | Gateway 到包装器的行为 |
-| --- | --- | --- |
-| `move_forward` | `speed_mps: number`、`duration_s: number` | 单次调用包装器同名工具。两个值在工具 schema 中必须大于 0。 |
-| `move_backward` | `speed_mps: number`、`duration_s: number` | 单次调用包装器同名工具。两个值在工具 schema 中必须大于 0。 |
-| `stop_all` | 无 | 单次调用包装器同名工具；逐项停止由底层机器狗 MCP 执行。 |
-| `motion_status` | 无 | 单次调用包装器同名工具。 |
-| `server_status` | 无 | 查询下层 DiMOS MCP 状态。 |
-| `list_modules` | 无 | 查询下层已部署模块和工具。 |
-| `agent_send` | `message: string` | 调用官方工具向下层 `/human_input` 发布消息；当前独立底层不运行 DiMOS LLM Agent，默认没有对话消费者。 |
-| `relative_move` | 可选 `forward`、`left`、`degrees` | 调用官方相对移动；缺省轴使用 `0`。 |
-| `wait` | `seconds: number` | 调用官方等待工具。 |
-| `current_time` | 无 | 查询下层时间。 |
-| `execute_sport_command` | `command_name: string` | 执行官方 Unitree 命名运动。 |
-| `get_battery_soc` | 无 | 查询 Go2 电量。 |
-| `observe` | 无 | 获取 Go2 当前观察。 |
-| `tag_location` | `location_name: string` | 命名当前地图位置。 |
-| `navigate_with_text` | `query: string` | 以自然语言目的地启动官方导航。 |
-| `return_to_start` | 无 | 返回本次下层进程捕获的第一帧有效里程计位置。 |
-| `return_to_user_and_greet` | 无 | 单次调用包装器；底层返回精确标记的“用户身边”，确认到达后静止 1 秒，再执行 `Hello`。 |
-| `begin_exploration` | 无 | 启动覆盖式 Frontier 探索。 |
-| `start_patrol` | 无 | 在已建图区域启动官方覆盖巡逻。 |
-| `look_out_for` | `description_of_things: string[]`、可选 `then` | 持续查找目标，可在发现后调用另一工具。 |
-| `start_stroll` | 无 | 启动随机选支、不回头补覆盖的人类式散步。 |
+```json
+{"kind":"go_to_place","destination":"演示点"}
+{"kind":"mark_place","name":"演示点"}
+{"kind":"visit_route","waypoints":["客厅","门口"],"repeat_count":2}
+{"kind":"follow_person"}
+```
 
-`return_to_user_and_greet` 是底层原子组合工具，不是实时人员跟随。部署者必须先在期望返回的位置调用 `tag_location(location_name="用户身边")`。底层拒绝其他近似标点；导航拒绝、取消、失败、100 秒超时或问候失败都会返回错误。只有导航 `is_goal_reached()` 成功后才进入硬性的 1 秒静止窗口，再调用官方 Unitree `Hello`。因此网关和包装器的默认 MCP 超时均为 120 秒。
+地点标签经 NFKC、trim 和空白折叠后长度必须为 1–200。路线必须包含 2–20 个地点，
+`repeat_count` 必须是 1–20 的整数，因此不能形成无限任务；`follow_person` 只能
+包含 `kind`。人物描述、bbox、task ID、Markdown、解释文字、额外字段或未知任务
+类型都会被拒绝。
 
-网关不会自动重试任何 MCP 工具调用。
+Gateway 使用 `sha256(instruction_id)` 的前 32 个十六进制字符形成稳定 task ID，并固定填写 `priority="normal"`、UTC `created_at`、`target_description=null` 和 `question=null`。模型不能覆盖这些字段。
+
+产品 Wrapper 精确开放 20 个工具：
+
+- 任务：`start_task`、`pause_task`、`resume_task`、`cancel_task`、`get_task_status`
+- 语义地点：`list_semantic_places`、`confirm_semantic_place`、`tag_location`、
+  `navigate_with_text`、`stop_navigation`
+- 官方人员跟随：`follow_person`
+- 受控相对位移：`relative_move`
+- 停止：`stop_all`
+- 状态/只读：`motion_status`、`get_robot_summary`、`server_status`、`list_modules`、`current_time`、`get_battery_soc`、`observe`
+
+Gateway 单地点和路线段只调用 `start_task/get_task_status`；标点调用
+`get_robot_summary/confirm_semantic_place`；跟随只调用一次 `follow_person`。
+精确任务控制使用 lifecycle tools，方向固定调用 `stop_all -> relative_move`。
+Gateway 不因网络失败自动重试运动工具。若提交响应不确定，它先用稳定 task ID 查询
+状态；只有明确仍处于本地 compiled、尚未提交的 binding 才在进程恢复时用同一 ID
+提交。
 
 ### 5.4 最终回复提取
 
-每个普通输入完成后，网关只读取本轮新增的最后一条 assistant 文本：
+产品模式的用户回复由 Gateway 根据已校验终态确定性生成，而不是读取模型的自由文本：
 
-- 不发送 token 流。
-- 不发送模型中间状态。
-- 不发送工具调用结构。
-- 不发送原始 MCP 返回对象。
-- 不发送推理过程。
+| 下游终态 | 条件 | 用户回复 |
+| --- | --- | --- |
+| `completed` | 同一 task ID，`active=false`，且包含结果证据 | `任务已完成：已到达“<destination>”。` |
+| 路线最终段 `completed` | 每一段都 completed，最终段 `active=false` | `路线任务已完成：<A → B>，共 <N> 轮。` |
+| `cancelled` | 同一 task ID，`active=false` | `任务已取消：<terminal_reason>。` |
+| `failed` | 同一 task ID，`active=false` | `任务未完成：<terminal_reason>。` |
 
-如果 Agent 抛出异常、没有产生新的 assistant 消息、最后文本为空或只包含空白，网关使用固定失败文本：
+标点被 `SemanticWorld` 接受后回复 `已将当前位置标记为“<name>”。`。暂停、继续、
+取消、状态和方向回复同样由固定代码生成，模型不能撰写或改写。
+
+如果编译、schema、MCP、状态一致性或超时检查失败，网关使用固定失败文本：
 
 ```text
 暂时无法完成此请求，请稍后重试。
 ```
 
-系统提示词明确告诉模型：
+accepted、queued、resolving、navigating、recovering、verifying、following 和 paused 都不是完成。终态但 `active=true` 也不会回复；Gateway 继续轮询，直到下游释放活动任务。
 
-> 你的最终输出会直接发给用户。
-
-并要求最终文本完整、简洁、直接面向用户，不包含内部推理、工具过程、原始结果或堆栈。
-
-但是，当前没有程序级文本清洗器检查模型最终文本。传输层保证只发送“最终 assistant 文本”，但最终文本本身是否完全遵循内容要求仍依赖模型。
-
-## 6. 停止口令快速路径
+## 6. 精确优先控制路径
 
 ### 6.1 匹配规则
 
@@ -370,7 +391,7 @@ HTTP `202` 只会在 `acceptInstruction` 完成后发送。
 3. 移除末尾连续出现的 `。`、`.`、`！`、`!`、`？`、`?`。
 4. 再次移除首尾空白。
 5. 使用 JavaScript `toLowerCase()` 转为小写。
-6. 仅当结果精确等于“停”或 `stop` 时进入快速路径。
+6. 仅当结果精确匹配下表某一控制词时进入优先路径。
 
 匹配示例：
 
@@ -385,9 +406,25 @@ HTTP `202` 只会在 `acceptInstruction` 完成后发送。
 | `请停下来` | 否 |
 | `stop now` | 否 |
 
+其他精确优先输入：
+
+| 规范化文本 | 调用 |
+| --- | --- |
+| `暂停` / `暂停任务` / `pause` | 当前 binding 的 `pause_task(task_id)` |
+| `继续` / `继续任务` / `resume` | 当前 binding 的 `resume_task(task_id)` |
+| `取消任务` / `cancel` | 当前 binding 的 `cancel_task(task_id)` |
+| `状态` / `机器人状态` / `任务状态` / `status` | 并行读取 `get_task_status`、`get_robot_summary`、`list_semantic_places` |
+| `前进` / `向前` / `forward` | `stop_all` 后 `relative_move(forward=0.2)` |
+| `后退` / `向后` / `backward` | `stop_all` 后 `relative_move(forward=-0.2)` |
+| `左移` / `向左` | `stop_all` 后 `relative_move(left=0.2)` |
+| `右移` / `向右` | `stop_all` 后 `relative_move(left=-0.2)` |
+| `左转` / `右转` | `stop_all` 后 `relative_move(degrees=15/-15)` |
+
+“向前走一米”等非精确文本不会进入方向路径，也不能让模型任意生成位移参数。
+
 ### 6.2 执行行为
 
-停止事件仍然：
+优先事件仍然：
 
 - 使用普通请求 schema；
 - 先写入 SQLite inbox；
@@ -398,10 +435,10 @@ HTTP `202` 只会在 `acceptInstruction` 完成后发送。
 与普通输入不同的是：
 
 - 它不会进入 Pi Agent 会话。
-- 它使用独立的停止队列。
+- 它使用现有独立优先队列。
 - 它不等待正在进行的普通 Agent 回合。
-- 它向 MCP 包装器单次调用 `stop_all`。
-- 多个停止事件之间仍按各自的持久化顺序串行处理。
+- 它按上表调用既有 MCP 工具；方向固定先停止当前活动，再做一个小步。
+- 多个优先事件之间仍按各自的持久化顺序串行处理。
 
 当 MCP 调用未抛出错误、HTTP 响应成功、MCP `result.isError` 不为 `true`，且结构化文本结果未标记 `status: "error"` 时，回复固定为：
 
@@ -418,60 +455,36 @@ HTTP `202` 只会在 `acceptInstruction` 完成后发送。
 ```
 
 停止快速路径不是独立物理急停。真实部署仍必须具备不经过模型、Webhook、网关和普通网络链路的物理安全路径。
+方向回复只表示 `relative_move` 已被下层接受，不证明 odometry 已完成 0.2 m 或
+15°。方向输入会终止当前自主任务，当前实现不会自动恢复。
 
-## 7. 自然语言运动语义
+## 7. Stage 2 自然语言语义
 
-### 7.1 当前系统提示词要求
+当前产品模式接受标点、前往地点、有限路线和“跟着我”：
 
-普通文本由 Pi Agent 模型解释。当前系统提示词要求模型按以下规则处理：
-
-| 用户表达 | 期望的模型行为 |
+| 用户表达 | 编译结果 |
 | --- | --- |
-| “以 0.1 米每秒走 1 秒” | 默认向前，调用 `move_forward(speed_mps=0.1, duration_s=1)`。 |
-| “后退 0.05 米每秒 2 秒” | 调用 `move_backward(speed_mps=0.05, duration_s=2)`。 |
-| “走 20 厘米，用 2 秒” | 将 0.2 米除以 2 秒，默认向前。 |
-| “后退半米，用 2 秒” | 将 0.5 米除以 2 秒，方向向后。 |
-| “走 1 米” | 使用 `AGENT_WEBHOOK_DEFAULT_SPEED_MPS` 计算时长，默认向前。 |
-| “后退 30 厘米” | 使用部署标定速度计算时长，方向向后。 |
-| “1 秒” | 参数不完整，向用户追问。 |
-| “以 0.1 米每秒走” | 参数不完整，向用户追问。 |
-| “走一点” | 没有可计算参数，向用户追问。 |
-| “向左走”或“转向” | 当前工具不支持，说明不支持，不得映射为前进或后退。 |
-| “探索一下未知区域” | 使用 `begin_exploration`，目标是尽量覆盖未知区域。 |
-| “开始巡逻” | 使用 `start_patrol`，只在已经建图的区域按官方覆盖路线巡视。 |
-| “像人一样随便散散步” | 使用 `start_stroll`，随机选择一条局部未知分支，放弃其他分支且不回头补覆盖。 |
-| “回到用户身边并打招呼” | 使用单个 `return_to_user_and_greet`；调用前应已通过 `tag_location` 标记“用户身边”，不得拆成导航、等待和问候三个调用。 |
+| “去演示点” | `{"kind":"go_to_place","destination":"演示点"}` |
+| “回到客厅” | `{"kind":"go_to_place","destination":"客厅"}` |
+| “把这里标记为演示点” | `{"kind":"mark_place","name":"演示点"}` |
+| “在客厅和门口之间往返两次” | `{"kind":"visit_route","waypoints":["客厅","门口"],"repeat_count":2}` |
+| “跟着我” | `{"kind":"follow_person"}`，固定锁定启动时画面中央的人。 |
+| “向前走一米” | 不属于 Stage 2 产品任务，编译失败且不调用 MCP。 |
+| “探索未知区域” | 不属于 Stage 2 产品任务，编译失败且不调用 MCP。 |
 
-提示词中的计算规则：
+标点要求 `get_robot_summary.odometry.fresh=true`；当重定位是必需项时还要求
+`relocalization.ready=true`，并只把稳定 pose 写入 canonical `SemanticWorld`。
+路线开始前通过 `list_semantic_places` 校验当前 map ID/version 的名称和别名；每段
+仍由下游 `MissionExecutor + SemanticWorld` 解析与导航。不存在的地点、错误地图或
+损坏语义库必须 fail-closed。官方 `tag_location/navigate_with_text` 仍保留为另一
+个官方入口，但 Agent 路线不同时写两份地点库。
 
-- 方向可选，未提供方向时默认向前。
-- 速度加时长可以直接形成工具参数。
-- 距离加时长使用“距离 ÷ 时长”计算速度。
-- 仅距离使用部署标定速度计算时长。
-- 速度和时长必须是正的有限数值。
-- 当前不添加硬编码速度或时长上限，也不得擅自修改用户明确指定的数值。
-- 距离运动只是定时速度估算，不是定位控制。
-- 最终回复不得声称已经精确移动或到达指定距离。
-- 覆盖探索、已建图巡逻和非覆盖式散步必须使用各自独立的启动工具；停止统一使用 `stop_all`。
+`follow_person` 不经过 `MissionExecutor`。它复用 DimOS 官方
+`PersonFollowSkillContainer`：Qwen VL 只做初次 bbox，EdgeTAM + 视觉伺服在本地
+持续跟随。该官方技能没有障碍物避让、自动重识别或 canonical 终态，停止统一发送
+“停”并调用 `stop_all`。
 
-### 7.2 当前保证边界
-
-上述自然语言语义目前只存在于：
-
-- Agent 系统提示词；
-- 21 个工具的名称、描述和 TypeBox 参数 schema。
-
-当前不存在：
-
-- 确定性的中文运动指令解析器；
-- 在模型调用工具前验证原始用户文本与工具参数一致性的策略门；
-- 验证模型计算结果是否符合距离公式的独立代码；
-- 阻止模型在不完整指令下调用运动工具的 before-tool 拦截器；
-- 真实模型行为的自动化验收测试。
-
-工具 schema 能够拒绝非数字、非正数或额外参数，但不能判断这些数字是否忠实来自用户文本。
-
-因此，对接方必须把本节理解为“当前 Agent 的模型策略”，而不是 Webhook 协议的确定性安全保证。如果项目验收要求无论模型如何响应都绝不误执行，必须先补充程序级策略门，再把相应行为升级为程序级保证。
+Stage 1 的确定性前进/返航 Agent 仍保留在 `validation` profile，只用于回归验收，不是当前产品路径。
 
 ## 8. Gateway 到 MCP 包装器的协议
 
@@ -497,10 +510,9 @@ Content-Type: application/json
   "id": 1,
   "method": "tools/call",
   "params": {
-    "name": "move_forward",
+    "name": "start_task",
     "arguments": {
-      "speed_mps": 0.1,
-      "duration_s": 2
+      "task_json": "{\"task_id\":\"task-...\",\"kind\":\"go_to_place\",\"destination\":\"演示点\",\"target_description\":null,\"question\":null,\"priority\":\"normal\",\"created_at\":\"2026-07-25T12:00:00.000Z\"}"
     }
   }
 }
@@ -509,7 +521,7 @@ Content-Type: application/json
 当前网关 MCP 客户端的现实行为：
 
 - 请求 ID 从进程内的 `1` 开始递增。
-- 每次工具调用只发送一个 `tools/call` 请求。
+- 新任务的 `start_task` 只发送一次；随后每次轮询各发送一个 `get_task_status`。
 - 不执行 MCP `initialize` 或 `tools/list`。
 - 不自动重试网络、HTTP、JSON-RPC 或工具错误。
 - 使用 `AGENT_WEBHOOK_MCP_TIMEOUT_MS` 设置单次超时。
@@ -556,7 +568,7 @@ Content-Type: application/json; charset=utf-8
   "event": "agent.reply.completed",
   "reply_id": "5ca7143f-7fb2-4cdf-a9ff-6d8f5c9b5107",
   "instruction_id": "6cfbbfbc-7ec5-4c47-a326-b3e2d563a43d",
-  "text": "好的，我已经提交了向前运动指令。",
+  "text": "任务已完成：已到达“演示点”。",
   "completed_at": "2026-07-23T12:30:00.000Z"
 }
 ```
@@ -596,7 +608,7 @@ Content-Type: application/json; charset=utf-8
 
 ### 9.4 固定失败文本
 
-当普通 Agent 回合失败、没有最终文本，或者停止快速路径调用失败时，网关仍发送普通 `agent.reply.completed`，并将 `text` 固定为：
+当普通 Agent 回合失败、没有最终文本，或者优先控制调用失败时，网关仍发送普通 `agent.reply.completed`，并将 `text` 固定为：
 
 ```text
 暂时无法完成此请求，请稍后重试。
@@ -638,13 +650,18 @@ Content-Type: application/json; charset=utf-8
 
 | 持久化状态 | 启动后的行为 |
 | --- | --- |
-| `pending` 普通输入 | 按原 `sequence` 继续交给固定 Agent。 |
-| `pending` 停止输入 | 由停止队列继续调用一次 `stop_all`。 |
-| `processing` 输入 | 不重新运行 Agent 或 MCP；直接创建固定失败回复并进入 outbox。 |
+| `pending` 普通输入 | 按原 `sequence` 继续交给参数编译器。 |
+| `pending` 优先输入 | 由优先队列按精确文本继续调用固定工具链。 |
+| `processing` 且没有 task binding | 不重跑模型或 MCP；创建固定失败回复并进入 outbox。 |
+| `processing` + compiled binding | 使用相同确定性 task ID 恢复提交；路线从当前段继续。 |
+| `processing` + submitted/monitoring binding | 只恢复 `get_task_status` 监听；不重新提交当前段。 |
 | `completed` 且回复未确认 | 按持久化的下一次尝试时间继续回调。 |
 | `completed` 且回复已确认 | 不再投递。 |
 
-`processing` 状态采用固定失败而不是自动重跑，是为了避免进程在机器狗副作用已经发生、但 outbox 尚未写入时重复执行动作。
+task binding 在任何 `start_task` 调用前写入。submitted/monitoring 状态确保已提交
+任务重启后只查状态；compiled 状态表示本地尚未确认提交，会用同一确定性 task ID
+恢复，MissionExecutor 必须以该 ID 幂等。路线 binding 同时保存当前 leg index，
+因此不会从第一段重跑。旧版本留下的无 binding `processing` 输入仍 fail-closed。
 
 部署方必须持久保存：
 
@@ -667,14 +684,17 @@ Content-Type: application/json; charset=utf-8
 | `AGENT_WEBHOOK_PORT` | 否 | `8080` | 1 至 65535 的正整数。 |
 | `AGENT_WEBHOOK_DATABASE_PATH` | 否 | `<cwd>/data/agent-webhook.sqlite` | SQLite inbox/outbox 路径。相对路径按网关进程 cwd 解析。 |
 | `AGENT_WEBHOOK_MCP_URL` | 否 | `http://127.0.0.1:9991/mcp` | MCP 包装器绝对 HTTP(S) URL。 |
-| `AGENT_WEBHOOK_MCP_TIMEOUT_MS` | 否 | `120000` | 单次 MCP HTTP 请求超时，必须是正有限数；默认覆盖返航问候工具最长 100 秒导航、1 秒静止窗口和调用开销。 |
+| `AGENT_WEBHOOK_MCP_TIMEOUT_MS` | 否 | `120000` | 单次 MCP HTTP 请求超时，必须是正有限数。 |
+| `AGENT_WEBHOOK_TASK_POLL_INTERVAL_MS` | 否 | `500` | `get_task_status` 轮询间隔，必须是正有限数。 |
+| `AGENT_WEBHOOK_TASK_TIMEOUT_MS` | 否 | `330000` | 单个任务等待终态的总时限，必须是正有限数。 |
 | `AGENT_WEBHOOK_REPLY_TIMEOUT_MS` | 否 | `10000` | 单次回复回调超时，必须是正有限数。 |
 | `AGENT_WEBHOOK_RETRY_BASE_MS` | 否 | `1000` | 首次回调重试等待时间，必须是正有限数。 |
 | `AGENT_WEBHOOK_RETRY_MAX_MS` | 否 | `60000` | 指数重试等待上限，必须是正有限数。当前不要求它大于 base。 |
 | `AGENT_WEBHOOK_AGENT_CWD` | 否 | 网关进程 cwd | 固定 Agent 的工作目录。相对路径按网关进程 cwd 解析。 |
 | `AGENT_WEBHOOK_AGENT_DIR` | 否 | `~/.pi/agent` | Pi 模型、认证和设置目录。 |
 | `AGENT_WEBHOOK_SESSION_DIR` | 否 | `<cwd>/data/agent-session` | 固定 Agent 会话持久化目录。 |
-| `AGENT_WEBHOOK_DEFAULT_SPEED_MPS` | 否 | `0.1` | 仅距离请求在系统提示词中使用的部署标定速度，必须是正有限数。 |
+| `AGENT_WEBHOOK_TOOL_PROFILE` | 否 | `product` | `product` 使用 Stage 2 参数编译；`validation` 保留 Stage 1 验收 Agent。 |
+| `AGENT_WEBHOOK_RUNTIME` | 否 | 按 profile | product 默认 `pi`；validation 默认 `validation`。 |
 
 所有环境变量只在进程启动时读取。修改后需要重启网关。
 
@@ -691,7 +711,9 @@ $env:AGENT_WEBHOOK_AGENT_DIR = "C:/Users/service-user/.pi/agent"
 $env:AGENT_WEBHOOK_AGENT_CWD = "C:/agent-workspace"
 $env:AGENT_WEBHOOK_MCP_URL = "http://127.0.0.1:9991/mcp"
 $env:AGENT_WEBHOOK_REPLY_URL = "http://reply-receiver:9080/agent-replies"
-$env:AGENT_WEBHOOK_DEFAULT_SPEED_MPS = "0.1"
+$env:AGENT_WEBHOOK_TASK_POLL_INTERVAL_MS = "500"
+$env:AGENT_WEBHOOK_TASK_TIMEOUT_MS = "330000"
+$env:AGENT_WEBHOOK_TOOL_PROFILE = "product"
 ```
 
 如果监听 `0.0.0.0`，必须由受信任网络、主机防火墙或反向代理限制来源。当前应用本身没有鉴权。
@@ -702,8 +724,8 @@ $env:AGENT_WEBHOOK_DEFAULT_SPEED_MPS = "0.1"
 
 - Node.js 22.19.0 或更高版本。
 - Pi 已经完成模型和认证配置。
-- DIMOS 机器狗 MCP 已启动。
-- DIMOS MCP 包装器已启动并能接受直接 HTTP `tools/call`。
+- product DIMOS 机器狗 MCP 已启动，并持有唯一 `MissionExecutor` 和 `SemanticWorld`。
+- product DIMOS MCP 包装器已启动并能接受直接 HTTP `tools/call`。
 - 回复接收端 URL 已实现并可访问。
 - 数据库和 session 目录位于持久化磁盘。
 
@@ -727,8 +749,8 @@ components/agent-framework/agent-webhook-gateway/dist
 
 推荐顺序：
 
-1. 启动机器狗 MCP，首次联调保持 dry-run。
-2. 启动 DIMOS MCP 包装器。
+1. 启动 product 机器狗 MCP；软件回放先用 dry-run，实机验收才切换 Go2。
+2. 启动 product DIMOS MCP 包装器。
 3. 启动并验证回复接收端。
 4. 设置网关环境变量。
 5. 启动 Agent Webhook Gateway。
@@ -763,10 +785,11 @@ CLI 处理 `SIGINT` 和 `SIGTERM`：
 
 1. 停止接受新连接。
 2. 等待当前 Agent、停止和回复投递任务完成。
-3. 关闭 Agent 会话。
-4. 关闭 SQLite。
+3. 中止本进程的任务轮询，但保留 task binding 供下次启动恢复。
+4. 关闭参数编译会话。
+5. 关闭 SQLite。
 
-当前普通 Agent 模型回合没有网关级独立超时。若模型调用本身长期不返回，优雅关闭也可能等待该回合结束。
+任务监听有独立总时限；当前参数编译模型回合没有网关级独立超时。
 
 ## 13. 输入端开发示例
 
@@ -775,7 +798,7 @@ CLI 处理 `SIGINT` 和 `SIGTERM`：
 ```bash
 curl --request POST "http://127.0.0.1:8080/v1/instructions" \
   --header "Content-Type: application/json; charset=utf-8" \
-  --data '{"instruction_id":"6cfbbfbc-7ec5-4c47-a326-b3e2d563a43d","text":"向前走 1 米"}'
+  --data '{"instruction_id":"6cfbbfbc-7ec5-4c47-a326-b3e2d563a43d","text":"请去演示点"}'
 ```
 
 ### 13.2 PowerShell
@@ -783,7 +806,7 @@ curl --request POST "http://127.0.0.1:8080/v1/instructions" \
 ```powershell
 $body = @{
     instruction_id = "6cfbbfbc-7ec5-4c47-a326-b3e2d563a43d"
-    text = "向前走 1 米"
+    text = "请去演示点"
 } | ConvertTo-Json -Compress
 
 Invoke-RestMethod `
@@ -863,11 +886,11 @@ async function receiveReply(request: Request): Promise<Response> {
 
 ## 15. Agent 侧扩展开发
 
-网关当前暴露三个主要抽象：
-
 | 抽象 | 当前实现 | 扩展用途 |
 | --- | --- | --- |
-| `UserTextAgent` | `PiUserTextAgent` | 替换用户文本运行时。 |
+| `TaskParameterCompiler` | `PiTaskParameterCompiler` | 增加新的受限任务参数编译器；不得持有 MCP 工具。 |
+| `UserTextAgent` | `ValidationAgent` | 只保留 Stage 1 确定性回归路径。 |
+| `TaskMonitor` | Gateway 内置 | 单次提交和终态监听。 |
 | `McpToolCaller` | `HttpMcpToolClient` | 替换 MCP 传输或测试 seam。 |
 | `ReplyEventDelivery` | `ReplyWebhookClient` | 替换最终回复投递适配器。 |
 
@@ -875,151 +898,90 @@ async function receiveReply(request: Request): Promise<Response> {
 
 - 输入必须先持久化再返回 `202`。
 - `instruction_id` 幂等和冲突语义。
-- 普通输入固定会话串行处理。
-- 停止口令的精确匹配和独立快速路径。
-- 每个输入最多形成一个稳定 `reply_id`。
-- outbox 必须先持久化再回调。
-- 回调重试不得重跑 Agent 或 MCP。
-- Agent 失败仍使用普通 `agent.reply.completed` 和固定失败文本。
-- 只交付最终用户可见文本。
-
-如果增加新的用户可见功能，必须同步更新根 `USAGE.md`。如果改变术语、架构边界或不变量，还必须同步更新根 `CONTEXT.md`。
+- task ID 必须由 Gateway 从 instruction ID 确定性生成。
+- task binding 必须先持久化，再调用 `start_task`。
+- 每个确定性 task ID 最多形成一个下游任务；submitted/monitoring 重启只恢复监听，
+  compiled 可用同一 ID 恢复提交。
+- 中间态和 `active=true` 的终态不得产生完成回复。
+- 精确优先控制保持独立路径，模型不能选择 `relative_move` 参数。
+- outbox 必须先持久化再回调；回调重试不得重跑模型或 MCP。
 
 ## 16. 当前自动化验证范围
 
-当前项目已经通过：
+Gateway 的定向自动化验证已覆盖：
 
-```powershell
-Set-Location "E:/Documents/GitHub/pi-hackason/components/agent-framework/agent-webhook-gateway"
-npm test
-npx tsc -p tsconfig.json --noEmit
-```
+- 严格 `go_to_place`、`mark_place`、有限 `visit_route`、`follow_person` 参数解析，
+  额外字段拒绝和稳定 task ID。
+- `TaskSpec` 与 `TaskSnapshot` schema、终态证据和 task ID 一致性。
+- task binding 在提交前持久化。
+- 重复 instruction 不重复编译；单地点和每个路线段使用不同确定性 ID。
+- accepted/navigating 不回复；终态且 inactive 才回复。
+- submitted binding 重启只轮询；路线重启只继续当前段和剩余段。
+- completed、failed、cancelled 的确定性终态回复。
+- stale odometry 禁止标点、未确认地点禁止路线提交。
+- 停止、暂停、继续、取消、状态和固定方向优先路径，以及 inbox/outbox 幂等和回复重投。
 
-当前结果：
+Wrapper 自动化验证已覆盖 product 20-tool allowlist，确认只有 `relative_move` 这一
+低层运动原语进入 product，其余旧运动工具仍隐藏。底层 MCP Blueprint/profile
+测试继续证明唯一导航组合和同一 allowlist。
 
-- 5 个测试文件通过。
-- 19 个测试通过。
-- TypeScript 类型检查通过。
+当前仍未覆盖：
 
-自动化测试已覆盖：
-
-- 停止口令精确规范化匹配。
-- 输入持久化后返回 `202`。
-- 完整最终回复 callback schema。
-- 相同 ID 幂等和不同文本冲突。
-- 普通输入固定会话串行顺序。
-- 停止事件绕过被阻塞的普通 Agent 回合。
-- 停止成功和失败的固定回复。
-- 回调失败使用相同 `reply_id` 重试且不重跑 Agent。
-- Agent 失败时的固定用户回复。
-- outbox 重试在进程恢复后继续且不重跑 Agent。
-- 包装器 MCP 每个工具调用只发送一次 `tools/call`。
-- MCP `result.isError` 被识别为失败。
-- DIMOS 异常文本和结构化工具错误被识别为失败。
-- 系统提示词包含“最终输出会直接发给用户”和运动语义。
-- 固定 Agent 只激活版本化的 21 个机器狗工具。
-- 必填回复 URL 和主要默认配置。
-
-当前自动化测试没有覆盖：
-
-- 真实模型是否稳定遵循自然语言运动规则。
-- 真实模型认证和 provider 网络。
-- `npm run build` 生成物的目标机运行。
-- 真实 DIMOS MCP 包装器和机器狗 MCP 的端到端调用。
-- 真实 Go2 硬件动作。
-- 真实回复接收端和输入端的跨主机网络。
-- 进程强制终止、磁盘损坏或 SQLite 文件恢复。
-- 64 KiB 边界值的自动化回归测试。
-- 长时间运行、数据库增长、回调永久失败和资源占用。
-- 多实例部署。
+- 真实 Pi 模型和 provider。
+- 真实回复接收端跨主机网络。
+- 真实 Go2 的语义地点到达。
+- 强制断电、SQLite 损坏、长时间运行和多实例部署。
 
 ## 17. 最终联调验收清单
 
-### 17.1 输入端
+### 17.1 输入与回复
 
-- [ ] 每个新用户意图在发送前生成并持久化唯一 `instruction_id`。
-- [ ] 同一意图的网络重试复用完全相同的 ID 和原始文本。
-- [ ] 请求体只包含 `instruction_id` 和 `text`。
-- [ ] 请求体始终小于或等于 64 KiB。
-- [ ] `202` 只被解释为异步受理。
-- [ ] 网络错误、超时和 `503` 使用相同请求重试。
-- [ ] `400`、`404` 和 `409` 停止自动重试并进入错误处理。
-- [ ] 输入端不直连 `:9990/mcp` 或 `:9991/mcp`。
+- [ ] 每个新意图先持久化唯一 `instruction_id`；网络重试复用相同 ID 和文本。
+- [ ] `202` 只解释为异步受理。
+- [ ] 回复端先持久化，再按 `reply_id` 返回幂等 `2xx`。
+- [ ] accepted、queued、navigating 等中间态没有“已完成”回复。
 
-### 17.2 回复接收端
+### 17.2 Agent、Wrapper 与任务
 
-- [ ] 提供部署级 HTTP(S) 回调 URL。
-- [ ] 在持久化事件后才返回 `2xx`。
-- [ ] 使用 `reply_id` 去重。
-- [ ] 重复事件不会重复显示、TTS 或触发副作用。
-- [ ] 使用 `instruction_id` 关联原输入，不依赖回调顺序。
-- [ ] 只消费 `agent.reply.completed` 的 `text`。
-- [ ] 固定失败文本可以直接向用户显示或朗读。
-- [ ] 非 `2xx`、连接断开和超时场景能触发网关重投。
+- [ ] product Pi 会话没有任何 MCP/coding tool。
+- [ ] “去演示点”只编译为 `go_to_place + 演示点`。
+- [ ] 标点只使用 fresh stable pose；路线只包含当前 map/version 已确认地点。
+- [ ] 额外字段、空地点、无限路线和非 Stage 2 请求不调用运动 MCP。
+- [ ] product Wrapper `tools/list` 精确为 20 个工具，除 `relative_move` 外不含旧低层运动。
+- [ ] 单地点只提交一个 task ID；有限路线每段不同 ID，上一段完成后才提交下一段。
+- [ ] 服务重启后 submitted/monitoring binding 只触发 `get_task_status`。
+- [ ] “停”、“停。”、“ STOP ”和“stop!”绕过参数编译器并调用 `stop_all`。
+- [ ] 暂停/继续/取消/状态和六方向精确输入绕过参数编译器。
 
-### 17.3 Agent 与 MCP
+### 17.3 语义导航实机
 
-- [ ] Pi 模型和认证在 `AGENT_WEBHOOK_AGENT_DIR` 中有效。
-- [ ] 包装器 MCP 可从网关主机访问。
-- [ ] 机器狗 MCP 初次联调运行在 dry-run。
-- [ ] `tools/list` 在底层和包装器均精确返回版本化的 21 个工具，且不包含 `speak`、人员跟随或专项停止工具。
-- [ ] 21 个工具在真实包装器链路上保持同名、同参数、单次转发。
-- [ ] 每个工具调用只到达下游一次。
-- [ ] “停”、“停。”、“ STOP ”和“stop!”绕过 Agent。
-- [ ] “别停”、“停止”、“请停下来”和“stop now”不会误入快速路径。
-- [ ] 停止成功回复为“已发送停止指令。”，而不是“机器狗已停止”。
-- [ ] 停止失败回复为固定通用失败文本。
+- [ ] 语义库中存在本地图版本下的测试地点和别名。
+- [ ] 任务进入 `navigating` 后，地图/里程计保持新鲜。
+- [ ] 到达后状态为 `completed`、`active=false`，并包含结果证据 ID。
+- [ ] 真实轨迹和终点误差满足 Stage 2 验收标准。
+- [ ] 找不到地点、错误地图、导航失败和取消分别得到正确失败/取消终态。
+- [ ] 停止后任务 inactive，导航器 idle。
 
-### 17.4 模型行为
-
-以下项目必须在目标模型上实际验收；现有单元测试不能替代：
-
-- [ ] “以 0.1 米每秒走 1 秒”形成正确的向前工具参数。
-- [ ] “走 20 厘米，用 2 秒”正确计算速度。
-- [ ] “走 1 米”使用部署标定速度计算时长。
-- [ ] 未给方向的完整运动请求默认向前。
-- [ ] “1 秒”“以 0.1 米每秒走”和“走一点”只追问，不调用运动工具。
-- [ ] 左、右、转向不会被错误映射为前进或后退。
-- [ ] “探索未知区域”“已建图巡逻”“像人一样散步”分别调用 `begin_exploration`、`start_patrol`、`start_stroll`。
-- [ ] “回到用户身边并打招呼”只调用一次 `return_to_user_and_greet`，并且目标环境已预先标记精确名称“用户身边”。
-- [ ] 停止任意后台行为时只调用 `stop_all`，不调用专项停止工具。
-- [ ] 最终回复不声称已经精确到达指定距离。
-- [ ] 最终回复直接面向用户，不包含内部推理、工具结构或异常堆栈。
-
-如果上述“不调用运动工具”必须成为硬性安全保证，应在交付前增加程序级策略门；仅通过本清单的模型抽样测试仍不等于确定性保证。
-
-### 17.5 持久化与恢复
+### 17.4 持久化与运行边界
 
 - [ ] 数据库和 session 目录位于持久化磁盘。
-- [ ] 重启后 `pending` 输入继续处理。
-- [ ] 重启后未确认 outbox 继续使用同一 `reply_id` 投递。
-- [ ] `processing` 输入在恢复后生成固定失败回复，不重复执行动作。
-- [ ] 不同时运行两个共享同一数据库/session 的网关进程。
-- [ ] 已评估数据库备份、磁盘容量、日志采集和人工故障处理。
-
-### 17.6 网络和安全
-
-- [ ] 入站和出站 URL 只位于受信任网络。
-- [ ] 未将当前无鉴权接口直接暴露到公网。
-- [ ] 主机防火墙或反向代理限制可访问来源。
-- [ ] 真实机器狗具备独立物理急停。
-- [ ] 没有把语音停止口令当作物理急停替代品。
+- [ ] 未确认 outbox 在重启后继续使用同一 `reply_id`。
+- [ ] 不同时运行两个共享数据库/session 或争抢 `9990/9991` 的控制栈。
+- [ ] 当前无鉴权接口只位于受信任局域网。
 
 ## 18. 当前交付结论
 
-从源代码和自动化测试角度，Webhook inbox/outbox、固定 Agent 会话、停止快速路径、MCP 单次调用和最终回复投递的 MVP 已经实现。
+目前可以声明：
 
-在目标环境完成第 17 节联调前，项目只能声明：
+> 既有 Agent 已串联标点、单地点、有限路线、任务控制、状态、小步方向及官方人员
+> 跟随；持久化绑定、路线恢复和 product Wrapper 工具面已完成代码级与 fake-MCP /
+> Blueprint 软件验证。
 
-> 接口实现和代码级行为已经完成，目标部署和真实链路尚未验收。
+目前不能声明：
 
-不得提前声明：
+- 当前 Go2 已经控制就绪；
+- 真实语义地点导航已经完成；
+- 真实模型和回复端已经端到端通过；
+- `202`、`start_task accepted` 或地图上存在路线就等于机器狗已到达。
 
-- 真实模型一定会遵循所有运动语义；
-- 真实 MCP 或机器狗动作已经验证；
-- 目标回复接收端已经可靠接收；
-- 该接口可以安全暴露到公网；
-- 停止回复证明机器狗物理静止；
-- 距离请求证明机器狗精确到达目标位置。
-
-完成联调后，交付方应保存实际环境变量、输入与回复样例、MCP 日志、回调去重证据和机器狗 dry-run/实机验收记录，作为最终交付证据。
+完成实机验收后，应保存输入、稳定 task ID、完整状态序列、语义地点版本、里程计轨迹、终点误差、终态证据和停止结果。

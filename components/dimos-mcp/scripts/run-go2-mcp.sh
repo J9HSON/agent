@@ -17,7 +17,11 @@ fail() {
 [[ -f "$ENV_FILE" ]] || fail "找不到私有配置文件：$ENV_FILE"
 [[ -r "$ENV_FILE" ]] || fail "无法读取私有配置文件：$ENV_FILE"
 
-permissions="$(stat --format='%a' "$ENV_FILE")"
+if permissions="$(stat --format='%a' "$ENV_FILE" 2>/dev/null)"; then
+    :
+else
+    permissions="$(stat -f '%Lp' "$ENV_FILE")"
+fi
 [[ "$permissions" == "600" ]] || fail "私有配置文件权限必须为 600，当前为 $permissions"
 
 set -a
@@ -26,14 +30,29 @@ set -a
 set +a
 
 [[ -n "${ROBOT_IP:-}" ]] || fail "go2.env 缺少 ROBOT_IP"
-[[ -n "${UNITREE_AES_128_KEY:-}" ]] || fail "go2.env 缺少 UNITREE_AES_128_KEY"
+[[ -n "${DIMOS_QWEN_VL_API_KEY:-}" ]] || fail \
+    "go2.env 缺少 DIMOS_QWEN_VL_API_KEY，官方人物跟随无法完成初次识别"
+export DIMOS_QWEN_VL_BASE_URL="${DIMOS_QWEN_VL_BASE_URL:-https://api.siliconflow.cn/v1}"
+export DIMOS_QWEN_VL_MODEL="${DIMOS_QWEN_VL_MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
+
+append_no_proxy() {
+    local key="$1"
+    local current="${!key:-}"
+    case ",$current," in
+        *",$ROBOT_IP,"*) ;;
+        *) export "$key=${current:+$current,}$ROBOT_IP" ;;
+    esac
+}
+append_no_proxy NO_PROXY
+append_no_proxy no_proxy
 
 export DIMOS_DOG_MCP_MODE="${DIMOS_DOG_MCP_MODE:-go2}"
 [[ "$DIMOS_DOG_MCP_MODE" == "go2" ]] || fail "启动脚本仅允许 DIMOS_DOG_MCP_MODE=go2"
 
 export DIMOS_DOG_MCP_HOST="${DIMOS_DOG_MCP_HOST:-127.0.0.1}"
 export DIMOS_DOG_MCP_PORT="${DIMOS_DOG_MCP_PORT:-9990}"
-export VIEWER="${VIEWER:-none}"
+export VIEWER="${VIEWER:-rerun}"
+export RERUN_OPEN="${RERUN_OPEN:-native}"
 
 [[ -x "$MCP_LAUNCHER" ]] || fail "找不到 WSL 虚拟环境中的 dimos-dog-mcp：$MCP_LAUNCHER"
 [[ -x "$MCP_PYTHON" ]] || fail "找不到 WSL 虚拟环境中的 Python：$MCP_PYTHON"

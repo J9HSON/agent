@@ -95,6 +95,12 @@ class McpForwardingSkill(Module):
         return self._dog_tools.motion_status()
 
     @skill
+    def get_robot_summary(self) -> str:
+        """Forward the upstream odometry path and freshness summary."""
+
+        return self._dog_tools.get_robot_summary()
+
+    @skill
     def server_status(self) -> str:
         """Forward the official DIMOS MCP server-status query."""
 
@@ -154,6 +160,16 @@ class McpForwardingSkill(Module):
         return self._dog_tools.observe()
 
     @skill
+    def follow_person(self, query: str) -> str:
+        """Start the official DimOS visual person-follow mode.
+
+        Args:
+            query: Visual description of the person to lock initially.
+        """
+
+        return self._dog_tools.follow_person(query)
+
+    @skill
     def tag_location(self, location_name: str) -> str:
         """Tag the robot's current mapped location with a reusable name.
 
@@ -172,6 +188,12 @@ class McpForwardingSkill(Module):
         """
 
         return self._dog_tools.navigate_with_text(query)
+
+    @skill
+    def stop_navigation(self) -> str:
+        """Cancel the active official DIMOS navigation goal."""
+
+        return self._dog_tools.stop_navigation()
 
     @skill
     def return_to_start(self) -> str:
@@ -212,3 +234,53 @@ class McpForwardingSkill(Module):
         """Start non-exhaustive, branch-committing human-like strolling."""
 
         return self._dog_tools.start_stroll()
+
+    @skill
+    def start_task(self, task_json: str) -> str:
+        """Submit one canonical mission to the upstream MissionExecutor.
+
+        Args:
+            task_json: Canonical TaskSpec JSON owned by the Gateway.
+        """
+
+        return self._dog_tools.start_task(task_json)
+
+    @skill
+    def pause_task(self, task_id: str) -> str:
+        """Pause one active canonical mission by stable task ID."""
+
+        return self._dog_tools.pause_task(task_id)
+
+    @skill
+    def resume_task(self, task_id: str) -> str:
+        """Resume one paused canonical mission by stable task ID."""
+
+        return self._dog_tools.resume_task(task_id)
+
+    @skill
+    def cancel_task(self, task_id: str) -> str:
+        """Cancel one canonical mission and wait for upstream navigation idle."""
+
+        return self._dog_tools.cancel_task(task_id)
+
+    @skill
+    def get_task_status(self) -> str:
+        """Read the upstream canonical mission snapshot."""
+
+        return self._dog_tools.get_task_status()
+
+    @skill
+    def list_semantic_places(self) -> str:
+        """List confirmed places for the upstream Runtime's current map."""
+
+        return self._dog_tools.list_semantic_places()
+
+    @skill
+    def confirm_semantic_place(self, place_json: str) -> str:
+        """Store one operator-confirmed place in the current semantic map.
+
+        Args:
+            place_json: Strict SemanticPlaceDraft JSON built from fresh odometry.
+        """
+
+        return self._dog_tools.confirm_semantic_place(place_json)

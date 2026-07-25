@@ -2,83 +2,97 @@ import { describe, expect, it } from "vitest";
 import { readGatewayConfig } from "../src/config.ts";
 
 describe("gateway configuration", () => {
-	it("requires one deployment-level reply URL and keeps the documented local defaults", () => {
-		const config = readGatewayConfig(
-			{ AGENT_WEBHOOK_REPLY_URL: "http://127.0.0.1:9080/replies" },
-			"C:/gateway",
-			"C:/Users/operator",
-		);
+	it("uses the local Agent Console for replies and keeps the documented defaults", () => {
+		const config = readGatewayConfig({}, "/gateway", "/Users/operator");
 
 		expect(config).toMatchObject({
 			host: "127.0.0.1",
 			port: 8080,
-			replyWebhookUrl: "http://127.0.0.1:9080/replies",
+			replyWebhookUrl: "http://127.0.0.1:8080/v1/ui-replies",
+			mapUrl: "http://127.0.0.1:9878/",
 			mcpWrapperUrl: "http://127.0.0.1:9991/mcp",
 			mcpTimeoutMs: 120_000,
+			taskPollIntervalMs: 500,
+			taskTimeoutMs: 330_000,
 			defaultSpeedMps: 0.1,
-			health: undefined,
+			toolProfile: "product",
+			agentRuntime: "pi",
+			agentModel: {
+				provider: "siliconflow",
+				modelId: "zai-org/GLM-5.2",
+				baseUrl: "https://api.siliconflow.cn/v1",
+			},
 		});
-		expect(config.databasePath.replaceAll("\\", "/")).toBe("C:/gateway/data/agent-webhook.sqlite");
-		expect(config.agentDir.replaceAll("\\", "/")).toBe("C:/Users/operator/.pi/agent");
+		expect(config.agentModel.apiKey).toContain("security find-generic-password");
+		expect(config.databasePath).toBe("/gateway/data/agent-webhook.sqlite");
+		expect(config.agentDir).toBe("/Users/operator/.pi/agent");
 	});
 
-	it("rejects startup without a valid reply URL", () => {
-		expect(() => readGatewayConfig({}, "C:/gateway", "C:/Users/operator")).toThrow(
-			"AGENT_WEBHOOK_REPLY_URL is required",
+	it("rejects an invalid explicit reply URL", () => {
+		expect(() => readGatewayConfig({ AGENT_WEBHOOK_REPLY_URL: "not-a-url" }, "/gateway", "/Users/operator")).toThrow(
+			"AGENT_WEBHOOK_REPLY_URL must be an absolute HTTP(S) URL",
 		);
-		expect(() =>
-			readGatewayConfig({ AGENT_WEBHOOK_REPLY_URL: "not-a-url" }, "C:/gateway", "C:/Users/operator"),
-		).toThrow("AGENT_WEBHOOK_REPLY_URL must be an absolute HTTP(S) URL");
 	});
 
-	it("enables the isolated health receiver only with a complete contract-valid configuration", () => {
+	it("reads explicit external reply and official map URLs", () => {
+		const config = readGatewayConfig(
+			{
+				AGENT_WEBHOOK_REPLY_URL: "https://receiver.example.test/replies",
+				AGENT_WEBHOOK_MAP_URL: "http://127.0.0.1:9090/",
+			},
+			"/gateway",
+			"/Users/operator",
+		);
+
+		expect(config.replyWebhookUrl).toBe("https://receiver.example.test/replies");
+		expect(config.mapUrl).toBe("http://127.0.0.1:9090/");
+	});
+
+	it("reads the explicit stage-one validation profile", () => {
 		const config = readGatewayConfig(
 			{
 				AGENT_WEBHOOK_REPLY_URL: "http://127.0.0.1:9080/replies",
-				AGENT_WEBHOOK_HEALTH_WEARER_ID: "xwen",
-				AGENT_WEBHOOK_HEALTH_KEY_ID: "health-webhook-2026-07",
-				AGENT_WEBHOOK_HEALTH_SECRET_HEX: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-				AGENT_WEBHOOK_HEALTH_PREVIOUS_KEY_ID: "health-webhook-2026-06",
-				AGENT_WEBHOOK_HEALTH_PREVIOUS_SECRET_HEX:
-					"101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+				AGENT_WEBHOOK_TOOL_PROFILE: "validation",
 			},
-			"C:/gateway",
-			"C:/Users/operator",
+			"/gateway",
+			"/Users/operator",
 		);
 
-		expect(config.health).toMatchObject({
-			wearerId: "xwen",
-			mcpCommand: "py",
-			mcpArgs: ["-3.12", "-m", "smart_neckband.health_mcp", "--transport", "stdio"],
-			mcpTimeoutMs: 10_000,
-		});
-		expect([...config.health!.keys.keys()]).toEqual(["health-webhook-2026-07", "health-webhook-2026-06"]);
+		expect(config.toolProfile).toBe("validation");
+		expect(config.agentRuntime).toBe("validation");
 	});
 
-	it("fails closed for partial or malformed health webhook secrets", () => {
-		const replyOnly = { AGENT_WEBHOOK_REPLY_URL: "http://127.0.0.1:9080/replies" };
+	it("rejects an unknown tool profile", () => {
 		expect(() =>
 			readGatewayConfig(
 				{
-					...replyOnly,
-					AGENT_WEBHOOK_HEALTH_WEARER_ID: "xwen",
-					AGENT_WEBHOOK_HEALTH_KEY_ID: "health-webhook-2026-07",
+					AGENT_WEBHOOK_REPLY_URL: "http://127.0.0.1:9080/replies",
+					AGENT_WEBHOOK_TOOL_PROFILE: "everything",
 				},
-				"C:/gateway",
-				"C:/Users/operator",
+				"/gateway",
+				"/Users/operator",
 			),
-		).toThrow("AGENT_WEBHOOK_HEALTH_SECRET_HEX is required");
-		expect(() =>
-			readGatewayConfig(
-				{
-					...replyOnly,
-					AGENT_WEBHOOK_HEALTH_WEARER_ID: "xwen",
-					AGENT_WEBHOOK_HEALTH_KEY_ID: "health-webhook-2026-07",
-					AGENT_WEBHOOK_HEALTH_SECRET_HEX: "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F",
-				},
-				"C:/gateway",
-				"C:/Users/operator",
-			),
-		).toThrow("AGENT_WEBHOOK_HEALTH_SECRET_HEX must be exactly 64 lowercase hexadecimal characters");
+		).toThrow("AGENT_WEBHOOK_TOOL_PROFILE must be one of: product, validation");
+	});
+
+	it("reads an explicit OpenAI-compatible Agent model configuration", () => {
+		const config = readGatewayConfig(
+			{
+				AGENT_WEBHOOK_REPLY_URL: "http://127.0.0.1:9080/replies",
+				AGENT_WEBHOOK_MODEL_PROVIDER: "private-provider",
+				AGENT_WEBHOOK_MODEL_ID: "org/model",
+				AGENT_WEBHOOK_MODEL_BASE_URL: "https://models.example.test/v1/",
+				AGENT_WEBHOOK_MODEL_API_KEY: "test-api-key",
+			},
+			"/gateway",
+			"/Users/operator",
+		);
+
+		expect(config.agentModel).toEqual({
+			provider: "private-provider",
+			modelId: "org/model",
+			baseUrl: "https://models.example.test/v1",
+			apiKey: "test-api-key",
+		});
 	});
 });

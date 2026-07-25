@@ -8,12 +8,11 @@
 		"agent-webhook-gateway": "./dist/cli.js"
 	},
 	"scripts": {
-		"start": "node --env-file=.env dist/cli.js",
-		"start:dev": "node --env-file=.env src/cli.ts",
+		"start": "node --env-file-if-exists=.env dist/cli.js",
+		"start:dev": "node --env-file-if-exists=.env src/cli.ts",
 		"check": "tsc --noEmit -p tsconfig.json",
 		"build": "tsc -p tsconfig.build.json",
 		"demo:dry-run": "node test/support/dry-run-demo.ts",
-		"demo:health-cross-repo": "node test/support/health-cross-repo-demo.ts",
 		"test": "node node_modules/vitest/dist/cli.js --run test"
 	},
 	"dependencies": {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HttpMcpToolClient } from "../src/mcp-client.ts";
+import { HttpMcpToolClient, McpCallError } from "../src/mcp-client.ts";
 
 describe("HTTP MCP tool client", () => {
 	it("sends exactly one tools/call request and returns the upstream text", async () => {
@@ -81,5 +81,30 @@ describe("HTTP MCP tool client", () => {
 		});
 
 		await expect(client.callTool("move_forward", {})).rejects.toThrow("movement is busy");
+	});
+
+	it("classifies an unreachable wrapper without exposing transport details to callers", async () => {
+		const client = new HttpMcpToolClient("http://127.0.0.1:9991/mcp", 1_000, async () => {
+			throw new TypeError("fetch failed", {
+				cause: new Error("connect ECONNREFUSED 127.0.0.1:9991"),
+			});
+		});
+
+		const error = await client.callTool("stop_all", {}).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(McpCallError);
+		expect((error as McpCallError).kind).toBe("unavailable");
+		expect((error as McpCallError).message).toBe("MCP wrapper is unavailable");
+	});
+
+	it("classifies a wrapper timeout as an ambiguous result", async () => {
+		const client = new HttpMcpToolClient("http://127.0.0.1:9991/mcp", 1, async (_url, init) => {
+			return await new Promise<Response>((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+			});
+		});
+
+		const error = await client.callTool("relative_move", {}).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(McpCallError);
+		expect((error as McpCallError).kind).toBe("timeout");
 	});
 });

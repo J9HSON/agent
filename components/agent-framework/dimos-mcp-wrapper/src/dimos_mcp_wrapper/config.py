@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 import math
 import os
 from urllib.parse import urlparse
@@ -16,6 +17,14 @@ DEFAULT_TIMEOUT_S = 120.0
 UPSTREAM_URL_ENV = "DIMOS_MCP_WRAPPER_UPSTREAM_URL"
 MCP_PORT_ENV = "DIMOS_MCP_WRAPPER_PORT"
 TIMEOUT_ENV = "DIMOS_MCP_WRAPPER_TIMEOUT_S"
+TOOL_PROFILE_ENV = "DIMOS_MCP_WRAPPER_PROFILE"
+
+
+class ToolProfile(str, Enum):
+    """Explicit public tool surfaces for product use and Stage 1 validation."""
+
+    PRODUCT = "product"
+    VALIDATION = "validation"
 
 
 @dataclass(frozen=True)
@@ -25,6 +34,7 @@ class WrapperConfig:
     upstream_url: str
     mcp_port: int
     timeout_s: float
+    tool_profile: ToolProfile
 
 
 def read_wrapper_config(env: Mapping[str, str] | None = None) -> WrapperConfig:
@@ -37,6 +47,9 @@ def read_wrapper_config(env: Mapping[str, str] | None = None) -> WrapperConfig:
         upstream_url=upstream_url,
         mcp_port=_read_port(source.get(MCP_PORT_ENV, str(DEFAULT_MCP_PORT))),
         timeout_s=_read_timeout(source.get(TIMEOUT_ENV, str(DEFAULT_TIMEOUT_S))),
+        tool_profile=_read_tool_profile(
+            source.get(TOOL_PROFILE_ENV, ToolProfile.PRODUCT.value)
+        ),
     )
 
 
@@ -68,3 +81,14 @@ def _read_timeout(raw_value: str) -> float:
     if not math.isfinite(timeout_s) or timeout_s <= 0:
         raise ValueError(f"{TIMEOUT_ENV} must be a positive finite number")
     return timeout_s
+
+
+def _read_tool_profile(raw_value: str) -> ToolProfile:
+    value = raw_value.strip().lower()
+    try:
+        return ToolProfile(value)
+    except ValueError as error:
+        allowed = ", ".join(profile.value for profile in ToolProfile)
+        raise ValueError(
+            f"{TOOL_PROFILE_ENV} must be one of: {allowed}; got {value!r}"
+        ) from error

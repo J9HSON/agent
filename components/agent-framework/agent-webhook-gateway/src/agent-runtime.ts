@@ -7,22 +7,56 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import type { AgentModelConfig, ToolProfile } from "./config.ts";
+import { createConfiguredAgentModel } from "./model-provider.ts";
+import {
+	type CompiledTaskParameters,
+	parseCompiledTaskParameters,
+	type TaskParameterCompiler,
+} from "./task-contract.ts";
 import type { McpToolCaller, UserTextAgent } from "./types.ts";
 
-export function buildAgentSystemPrompt(defaultSpeedMps: number): string {
+export function buildTaskCompilerSystemPrompt(): string {
+	return `你是 Stage 2 机器狗任务参数编译器，不是任务执行器。
+
+你没有任何工具，也不能调用 MCP、控制机器狗、生成 task_id、时间戳或任务终态。
+	当前支持四种严格 JSON：
+	- “去某个已确认地点”：
+	{"kind":"go_to_place","destination":"地点名称"}
+	- “把当前位置标记为某个名称”：
+	{"kind":"mark_place","name":"地点名称"}
+	- “依次前往多个已确认地点并重复有限次数”：
+	{"kind":"visit_route","waypoints":["地点A","地点B"],"repeat_count":2}
+	- “跟着我”“开始跟随我”：锁定启动时画面中央的人：
+	{"kind":"follow_person"}
+
+	只输出一行 JSON，不要 Markdown、解释或额外字段。地点名称必须保留用户原话。
+	visit_route 必须至少两个地点，repeat_count 必须是用户明确给出的 1 到 20 的整数；
+	没有明确次数时使用 1，绝不能输出无限循环。只有用户明确要求跟随自己时才使用
+	follow_person；它不能包含人员描述、照片、bbox 或身份字段。无法确定意图时不要猜测。`;
+}
+
+export function buildAgentSystemPrompt(defaultSpeedMps: number, toolProfile: ToolProfile = "product"): string {
+	const profileRules =
+		toolProfile === "validation"
+			? `当前是 Stage 1 真机验证模式，只允许五个工具：
+- relative_move：执行短距离相对移动；
+- return_to_start：返回本次 Runtime 捕获的起点；
+- motion_status：读取本地命令执行状态；
+- get_robot_summary：读取真实 odometry、actual path 和数据新鲜度；
+- stop_all：立即停止所有活动。
+
+执行移动或返回后，必须继续读取 motion_status 和 get_robot_summary。MCP 返回 accepted/started 只表示命令被接受，不等于机器人已经移动或到达。只有 fresh odometry 发生变化才能说机器人移动；只有回到容差内且状态 idle 才能说返回完成。`
+			: `当前是 product 模式。只使用已注册的高层导航、探索、观察、状态和停止工具。
+不得自行换算并调用低层相对位移、定时速度或运动动作工具。`;
 	return `你是一个通过 MCP 控制机器狗的本地探索 Agent。
 
 你的最终输出会直接发给用户。最终回复必须完整、简洁、直接面向用户，不得输出内部推理、工具调用过程、原始工具结果或异常堆栈。
 
-运动规则：
-- 用户可以提供“速度加时长”“距离加时长”或仅“距离”。方向可选，方向默认为向前。
-- “距离加时长”使用“距离 ÷ 时长”计算速度。
-- 仅提供距离时，使用部署标定速度 ${defaultSpeedMps} 米每秒计算时长。
-- 速度和时长只需是正的有限数值，不添加硬编码范围限制，也不得擅自改变用户指定的数值。
-- 只有时长或只有速度时参数不完整，必须向用户追问，不得调用运动工具或套用默认参数。
-- 当前只支持向前和向后。左、右、转向等请求必须说明尚不支持，不得映射为前后运动。
-- 距离运动是基于速度和时长的估算，不得声称机器狗精确移动或到达了指定距离。
-- 工具调用成功只说明命令已被 MCP 接受；最终回复不得虚构机器狗遥测或物理状态。
+${profileRules}
+
+共同运动规则：
+- 部署标定参考速度是 ${defaultSpeedMps} 米每秒，但不得用它伪造里程计结果。
 - 禁止执行 Bound（包括大小写或格式变体）以及任何空翻动作，包括前空翻、后空翻、侧空翻、连续空翻，或命令名中含 flip、somersault 的动作。
 - 收到上述禁止动作请求时必须明确拒绝；不得调用 execute_sport_command 或任何其他运动工具，也不得改写或映射为其他动作。
 
@@ -38,7 +72,7 @@ export function buildAgentSystemPrompt(defaultSpeedMps: number): string {
 规范化后精确等于“停”或“stop”的输入会在进入你之前由输入网关处理。其他文本都作为普通用户请求处理。`;
 }
 
-export function createDogTools(mcp: McpToolCaller) {
+export function createDogTools(mcp: McpToolCaller, toolProfile: ToolProfile = "product") {
 	const noArguments = Type.Object({}, { additionalProperties: false });
 	const noArgumentTool = (name: string, label: string, description: string, promptSnippet: string) =>
 		defineTool({
@@ -130,6 +164,13 @@ export function createDogTools(mcp: McpToolCaller) {
 			details: {},
 		}),
 	});
+
+	const getRobotSummary = noArgumentTool(
+		"get_robot_summary",
+		"Get Robot Summary",
+		"读取真实 odometry、actual path、位移、累计路程和数据新鲜度。",
+		"读取机器狗真实轨迹和状态摘要",
+	);
 
 	const serverStatus = noArgumentTool(
 		"server_status",
@@ -382,11 +423,79 @@ export function createDogTools(mcp: McpToolCaller) {
 		"开始非穷举的人类式自主散步",
 	);
 
-	return [
+	const startTask = defineTool({
+		name: "start_task",
+		label: "Start Task",
+		description: "向唯一 MissionExecutor 提交一个 canonical TaskSpec JSON。",
+		promptSnippet: "提交高层机器狗任务",
+		parameters: Type.Object(
+			{
+				task_json: Type.String({
+					minLength: 1,
+					description: "由 Gateway 生成的 canonical TaskSpec JSON",
+				}),
+			},
+			{ additionalProperties: false },
+		),
+		executionMode: "sequential",
+		execute: async (_toolCallId, params, signal) => ({
+			content: [
+				{
+					type: "text",
+					text: await mcp.callTool("start_task", { task_json: params.task_json }, signal),
+				},
+			],
+			details: {},
+		}),
+	});
+	const taskIdTool = (name: "pause_task" | "resume_task" | "cancel_task", label: string, description: string) =>
+		defineTool({
+			name,
+			label,
+			description,
+			promptSnippet: description,
+			parameters: Type.Object(
+				{
+					task_id: Type.String({
+						minLength: 8,
+						description: "Gateway 持久化的稳定任务 ID",
+					}),
+				},
+				{ additionalProperties: false },
+			),
+			executionMode: "sequential",
+			execute: async (_toolCallId, params, signal) => ({
+				content: [
+					{
+						type: "text",
+						text: await mcp.callTool(name, { task_id: params.task_id }, signal),
+					},
+				],
+				details: {},
+			}),
+		});
+	const pauseTask = taskIdTool("pause_task", "Pause Task", "暂停 canonical 任务");
+	const resumeTask = taskIdTool("resume_task", "Resume Task", "恢复 canonical 任务");
+	const cancelTask = taskIdTool("cancel_task", "Cancel Task", "取消 canonical 任务");
+	const getTaskStatus = noArgumentTool(
+		"get_task_status",
+		"Get Task Status",
+		"读取 canonical 任务状态；accepted 不等于 completed。",
+		"读取任务状态",
+	);
+	const listSemanticPlaces = noArgumentTool(
+		"list_semantic_places",
+		"List Semantic Places",
+		"列出当前地图版本下已确认的语义地点。",
+		"列出已确认地点",
+	);
+
+	const tools = [
 		moveForward,
 		moveBackward,
 		stopAll,
 		motionStatus,
+		getRobotSummary,
 		serverStatus,
 		listModules,
 		agentSend,
@@ -404,7 +513,40 @@ export function createDogTools(mcp: McpToolCaller) {
 		startPatrol,
 		lookOutFor,
 		startStroll,
+		startTask,
+		pauseTask,
+		resumeTask,
+		cancelTask,
+		getTaskStatus,
+		listSemanticPlaces,
 	] as const;
+	const profileToolNames =
+		toolProfile === "validation"
+			? ["relative_move", "return_to_start", "motion_status", "get_robot_summary", "stop_all"]
+			: [
+					"stop_all",
+					"motion_status",
+					"get_robot_summary",
+					"server_status",
+					"list_modules",
+					"current_time",
+					"get_battery_soc",
+					"observe",
+					"start_task",
+					"pause_task",
+					"resume_task",
+					"cancel_task",
+					"get_task_status",
+					"list_semantic_places",
+				];
+	const toolsByName = new Map(tools.map((tool) => [tool.name, tool]));
+	return profileToolNames.map((name) => {
+		const tool = toolsByName.get(name);
+		if (!tool) {
+			throw new Error(`Tool profile references unknown tool: ${name}`);
+		}
+		return tool;
+	});
 }
 
 export interface PiUserTextAgentOptions {
@@ -412,10 +554,13 @@ export interface PiUserTextAgentOptions {
 	agentDir: string;
 	sessionDir: string;
 	defaultSpeedMps: number;
+	toolProfile?: ToolProfile;
+	agentModel: AgentModelConfig;
 	mcp: McpToolCaller;
 }
 
 export async function createPiAgentSession(options: PiUserTextAgentOptions): Promise<AgentSession> {
+	const configuredModel = await createConfiguredAgentModel(options.agentModel);
 	const settingsManager = SettingsManager.create(options.cwd, options.agentDir);
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: options.cwd,
@@ -426,7 +571,7 @@ export async function createPiAgentSession(options: PiUserTextAgentOptions): Pro
 		noPromptTemplates: true,
 		noThemes: true,
 		noContextFiles: true,
-		systemPrompt: buildAgentSystemPrompt(options.defaultSpeedMps),
+		systemPrompt: buildAgentSystemPrompt(options.defaultSpeedMps, options.toolProfile),
 	});
 	await resourceLoader.reload();
 	const sessionManager = SessionManager.continueRecent(options.cwd, options.sessionDir);
@@ -436,8 +581,11 @@ export async function createPiAgentSession(options: PiUserTextAgentOptions): Pro
 		settingsManager,
 		resourceLoader,
 		sessionManager,
+		modelRuntime: configuredModel.modelRuntime,
+		model: configuredModel.model,
+		thinkingLevel: "off",
 		noTools: "builtin",
-		customTools: [...createDogTools(options.mcp)],
+		customTools: [...createDogTools(options.mcp, options.toolProfile)],
 	});
 	return session;
 }
@@ -465,6 +613,73 @@ export class PiUserTextAgent implements UserTextAgent {
 			throw new Error("Agent produced an empty final assistant message");
 		}
 		return reply;
+	}
+
+	close(): void {
+		this.session.dispose();
+	}
+}
+
+export interface PiTaskParameterCompilerOptions {
+	cwd: string;
+	agentDir: string;
+	sessionDir: string;
+	agentModel: AgentModelConfig;
+}
+
+export async function createPiTaskCompilerSession(options: PiTaskParameterCompilerOptions): Promise<AgentSession> {
+	const configuredModel = await createConfiguredAgentModel(options.agentModel);
+	const settingsManager = SettingsManager.create(options.cwd, options.agentDir);
+	const resourceLoader = new DefaultResourceLoader({
+		cwd: options.cwd,
+		agentDir: options.agentDir,
+		settingsManager,
+		noExtensions: true,
+		noSkills: true,
+		noPromptTemplates: true,
+		noThemes: true,
+		noContextFiles: true,
+		systemPrompt: buildTaskCompilerSystemPrompt(),
+	});
+	await resourceLoader.reload();
+	const sessionManager = SessionManager.continueRecent(options.cwd, options.sessionDir);
+	const { session } = await createAgentSession({
+		cwd: options.cwd,
+		agentDir: options.agentDir,
+		settingsManager,
+		resourceLoader,
+		sessionManager,
+		modelRuntime: configuredModel.modelRuntime,
+		model: configuredModel.model,
+		thinkingLevel: "off",
+		noTools: "all",
+	});
+	return session;
+}
+
+export class PiTaskParameterCompiler implements TaskParameterCompiler {
+	private readonly session: AgentSession;
+
+	private constructor(session: AgentSession) {
+		this.session = session;
+	}
+
+	static async create(options: PiTaskParameterCompilerOptions): Promise<PiTaskParameterCompiler> {
+		return new PiTaskParameterCompiler(await createPiTaskCompilerSession(options));
+	}
+
+	async compile(text: string): Promise<CompiledTaskParameters> {
+		const assistantMessagesBefore = this.session.messages.filter((message) => message.role === "assistant").length;
+		await this.session.prompt(`将下面用户指令编译为规定的一行 JSON：\n${text}`, { expandPromptTemplates: false });
+		const assistantMessagesAfter = this.session.messages.filter((message) => message.role === "assistant").length;
+		if (assistantMessagesAfter <= assistantMessagesBefore) {
+			throw new Error("Task compiler did not produce an assistant message");
+		}
+		const raw = this.session.getLastAssistantText();
+		if (!raw) {
+			throw new Error("Task compiler produced an empty response");
+		}
+		return parseCompiledTaskParameters(raw);
 	}
 
 	close(): void {

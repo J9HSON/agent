@@ -54,11 +54,11 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 describe("Agent input and final reply webhook", () => {
-	it("matches only the documented normalized stop phrases", () => {
-		for (const text of ["停", "停。", " STOP ", "stop!"]) {
+	it("matches normalized natural-language stop phrases without matching negation", () => {
+		for (const text of ["停", "停。", " STOP ", "stop!", "停止", "请停下来", "马上停", "别动", "stop now"]) {
 			expect(isStopPhrase(text), text).toBe(true);
 		}
-		for (const text of ["别停", "停止", "请停下来", "stop now"]) {
+		for (const text of ["别停", "不要停止任务", "停靠在门口"]) {
 			expect(isStopPhrase(text), text).toBe(false);
 		}
 	});
@@ -154,11 +154,11 @@ describe("Agent input and final reply webhook", () => {
 				body: JSON.stringify({ instruction_id: "stable-id", text }),
 			});
 
-		expect((await submit("向前走")).status).toBe(202);
-		expect((await submit("向前走")).status).toBe(202);
-		expect((await submit("向后走")).status).toBe(409);
+		expect((await submit("解释一下当前状态")).status).toBe(202);
+		expect((await submit("解释一下当前状态")).status).toBe(202);
+		expect((await submit("解释一下地图")).status).toBe(409);
 		await waitFor(() => prompts.length === 1);
-		expect(prompts).toEqual(["向前走"]);
+		expect(prompts).toEqual(["解释一下当前状态"]);
 
 		await service.close();
 	});

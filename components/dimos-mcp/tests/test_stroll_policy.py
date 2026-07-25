@@ -4,20 +4,31 @@ import random
 import unittest
 
 from dimos_dog_mcp.stroll_policy import StrollCandidate, StrollPolicy
-from dimos_dog_mcp.tool_contract import PUBLIC_TOOL_NAMES
+from dimos_dog_mcp.tool_contract import (
+    MAINTENANCE_TOOL_NAMES,
+    PRODUCT_TOOL_NAMES,
+    PUBLIC_TOOL_NAMES,
+)
 
 
 class StrollPolicyTests(unittest.TestCase):
-    def test_versioned_public_contract_exposes_only_the_unified_stop_tool(self) -> None:
-        self.assertEqual(len(PUBLIC_TOOL_NAMES), 21)
+    def test_versioned_public_contract_matches_the_maintenance_profile(self) -> None:
+        self.assertEqual(PUBLIC_TOOL_NAMES, MAINTENANCE_TOOL_NAMES)
+        self.assertEqual(len(PUBLIC_TOOL_NAMES), 32)
         self.assertTrue(
             {
                 "server_status",
                 "observe",
                 "start_patrol",
                 "return_to_start",
+                "get_robot_summary",
                 "return_to_user_and_greet",
                 "start_stroll",
+                "start_task",
+                "get_task_status",
+                "cancel_task",
+                "list_semantic_places",
+                "confirm_semantic_place",
                 "stop_all",
             }
             <= PUBLIC_TOOL_NAMES
@@ -25,16 +36,15 @@ class StrollPolicyTests(unittest.TestCase):
         self.assertTrue(
             {
                 "speak",
-                "follow_person",
-                "stop_following",
                 "stop_motion",
-                "stop_navigation",
                 "end_exploration",
                 "stop_patrol",
                 "stop_stroll",
                 "stop_looking_out",
             }.isdisjoint(PUBLIC_TOOL_NAMES)
         )
+        self.assertIn("follow_person", PRODUCT_TOOL_NAMES)
+        self.assertIn("stop_navigation", PRODUCT_TOOL_NAMES)
 
     def test_randomly_chooses_one_branch_and_retires_its_siblings(self) -> None:
         policy = StrollPolicy(random.Random(7))

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import importlib.util
+from types import SimpleNamespace
 import subprocess
 import sys
 import unittest
@@ -133,6 +135,17 @@ class Go2LocomotionBootstrapTests(unittest.TestCase):
         with (
             patch.object(blueprint, "read_mcp_server_config", return_value=server_config),
             patch.object(blueprint, "read_runtime_mode", return_value=RuntimeMode.GO2),
+            patch.object(
+                blueprint,
+                "claim_runtime",
+                return_value=nullcontext(
+                    SimpleNamespace(
+                        pid=123,
+                        mode="go2",
+                        robot_ip="192.0.2.1",
+                    )
+                ),
+            ),
             patch.object(blueprint, "configure_mcp_listener"),
             patch.object(blueprint, "build_blueprint", return_value=object()),
             patch.object(blueprint.ModuleCoordinator, "build", return_value=coordinator),
@@ -158,6 +171,17 @@ class Go2LocomotionBootstrapTests(unittest.TestCase):
         with (
             patch.object(blueprint, "read_mcp_server_config", return_value=server_config),
             patch.object(blueprint, "read_runtime_mode", return_value=RuntimeMode.DRY_RUN),
+            patch.object(
+                blueprint,
+                "claim_runtime",
+                return_value=nullcontext(
+                    SimpleNamespace(
+                        pid=123,
+                        mode="dry-run",
+                        robot_ip=None,
+                    )
+                ),
+            ),
             patch.object(blueprint, "configure_mcp_listener"),
             patch.object(blueprint, "build_blueprint", return_value=object()),
             patch.object(blueprint.ModuleCoordinator, "build", return_value=coordinator),

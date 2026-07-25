@@ -46,6 +46,8 @@ class MotionStatus:
     linear_x: float | None
     linear_y: float | None
     angular_z: float | None
+    last_command: VelocityCommand | None
+    last_outcome: Literal["completed", "stopped"] | None
 
 
 @dataclass
@@ -90,6 +92,8 @@ class MotionRuntime:
         self._publish_interval_s = 1.0 / publish_hz
         self._lock = threading.RLock()
         self._active: _ActiveMotion | None = None
+        self._last_command: VelocityCommand | None = None
+        self._last_outcome: Literal["completed", "stopped"] | None = None
 
     def execute(self, command: VelocityCommand) -> MotionOutcome:
         """Publish one timed command until completion or an explicit stop."""
@@ -122,6 +126,8 @@ class MotionRuntime:
             if self._active is not None:
                 raise MotionBusyError("A movement command is already active; call stop_all first")
             self._active = active
+            self._last_command = command
+            self._last_outcome = None
         return active
 
     def _run(self, active: _ActiveMotion) -> MotionOutcome:
@@ -149,6 +155,7 @@ class MotionRuntime:
                 if self._active is active:
                     self._active = None
                     self._publish(VelocityCommand.zero())
+                self._last_outcome = state
 
         return MotionOutcome(state=state, elapsed_s=time.monotonic() - active.started_at)
 
@@ -160,6 +167,7 @@ class MotionRuntime:
             if active is not None:
                 active.stop_event.set()
                 self._active = None
+                self._last_outcome = "stopped"
             self._publish(VelocityCommand.zero())
         return active is not None
 
@@ -169,10 +177,19 @@ class MotionRuntime:
         with self._lock:
             active = self._active
             if active is None:
-                return MotionStatus(active=False, linear_x=None, linear_y=None, angular_z=None)
+                return MotionStatus(
+                    active=False,
+                    linear_x=None,
+                    linear_y=None,
+                    angular_z=None,
+                    last_command=self._last_command,
+                    last_outcome=self._last_outcome,
+                )
             return MotionStatus(
                 active=True,
                 linear_x=active.command.linear_x,
                 linear_y=active.command.linear_y,
                 angular_z=active.command.angular_z,
+                last_command=self._last_command,
+                last_outcome=self._last_outcome,
             )

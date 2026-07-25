@@ -1,6 +1,17 @@
 import type { McpToolCaller } from "./types.ts";
 
 type JsonObject = Record<string, unknown>;
+export type McpCallErrorKind = "unavailable" | "timeout" | "protocol" | "rejected";
+
+export class McpCallError extends Error {
+	readonly kind: McpCallErrorKind;
+
+	constructor(kind: McpCallErrorKind, message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "McpCallError";
+		this.kind = kind;
+	}
+}
 
 function isObject(value: unknown): value is JsonObject {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -26,45 +37,67 @@ export class HttpMcpToolClient implements McpToolCaller {
 		const requestId = this.nextRequestId++;
 		const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
 		const signal = externalSignal ? AbortSignal.any([externalSignal, timeoutSignal]) : timeoutSignal;
-		const response = await this.fetchFunction(this.endpointUrl, {
-			method: "POST",
-			headers: {
-				accept: "application/json",
-				"content-type": "application/json",
-			},
-			body: JSON.stringify({
-				jsonrpc: "2.0",
-				id: requestId,
-				method: "tools/call",
-				params: { name, arguments: arguments_ },
-			}),
-			signal,
-		});
+		let response: Response;
+		try {
+			response = await this.fetchFunction(this.endpointUrl, {
+				method: "POST",
+				headers: {
+					accept: "application/json",
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({
+					jsonrpc: "2.0",
+					id: requestId,
+					method: "tools/call",
+					params: { name, arguments: arguments_ },
+				}),
+				signal,
+			});
+		} catch (error) {
+			if (externalSignal?.aborted) {
+				throw error;
+			}
+			if (timeoutSignal.aborted) {
+				throw new McpCallError("timeout", "MCP wrapper request timed out", { cause: error });
+			}
+			throw new McpCallError("unavailable", "MCP wrapper is unavailable", { cause: error });
+		}
 		if (!response.ok) {
 			await response.body?.cancel();
-			throw new Error(`MCP wrapper returned HTTP ${response.status}`);
+			if (response.status === 408 || response.status === 504) {
+				throw new McpCallError("timeout", `MCP wrapper returned HTTP ${response.status}`);
+			}
+			if (response.status >= 500) {
+				throw new McpCallError("unavailable", `MCP wrapper returned HTTP ${response.status}`);
+			}
+			throw new McpCallError("protocol", `MCP wrapper returned HTTP ${response.status}`);
 		}
 
-		const payload: unknown = await response.json();
+		let payload: unknown;
+		try {
+			payload = await response.json();
+		} catch (error) {
+			throw new McpCallError("protocol", "MCP wrapper returned invalid JSON", { cause: error });
+		}
 		if (!isObject(payload)) {
-			throw new Error("MCP wrapper returned a non-object JSON response");
+			throw new McpCallError("protocol", "MCP wrapper returned a non-object JSON response");
 		}
 		if (isObject(payload.error)) {
 			const code = typeof payload.error.code === "number" ? payload.error.code : "unknown";
 			const message = typeof payload.error.message === "string" ? payload.error.message : "unknown MCP error";
-			throw new Error(`MCP wrapper error ${code}: ${message}`);
+			throw new McpCallError("rejected", `MCP wrapper error ${code}: ${message}`);
 		}
 		if (!isObject(payload.result)) {
-			throw new Error("MCP wrapper response does not contain a result object");
+			throw new McpCallError("protocol", "MCP wrapper response does not contain a result object");
 		}
 
 		const resultText = readResultText(payload.result);
 		if (payload.result.isError === true) {
-			throw new Error(resultText || "MCP wrapper reported a tool execution error");
+			throw new McpCallError("rejected", resultText || "MCP wrapper reported a tool execution error");
 		}
 		const toolError = readToolError(resultText);
 		if (toolError) {
-			throw new Error(toolError);
+			throw new McpCallError("rejected", toolError);
 		}
 		return resultText || JSON.stringify(payload.result);
 	}

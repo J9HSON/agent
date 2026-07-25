@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import importlib.util
 import json
 import os
+from pathlib import Path
 import socket
 import sys
+import tempfile
 import threading
+import time
 import unittest
 
 
@@ -19,7 +23,27 @@ class DimosIntegrationTests(unittest.TestCase):
         cls._previous_mode = os.environ.get("DIMOS_DOG_MCP_MODE")
         cls._previous_mcp_port_env = os.environ.get("MCP_PORT")
         cls._previous_listen_host_env = os.environ.get("LISTEN_HOST")
+        cls._semantic_env_names = (
+            "DIMOS_DOG_MCP_TOOL_PROFILE",
+            "DIMOS_SEMANTIC_WORLD_PATH",
+            "DIMOS_MAP_ID",
+            "DIMOS_MAP_VERSION",
+            "DIMOS_PREMAP_FILE",
+        )
+        cls._previous_semantic_env = {
+            name: os.environ.get(name) for name in cls._semantic_env_names
+        }
+        cls._temp_dir = tempfile.TemporaryDirectory()
+        cls._semantic_store = Path(cls._temp_dir.name) / "semantic-world.json"
+        cls._premap_file = Path(cls._temp_dir.name) / "test.pc2.lcm"
+        cls._premap_file.write_bytes(b"blueprint-only fixture")
         os.environ["DIMOS_DOG_MCP_MODE"] = "dry-run"
+        os.environ["DIMOS_DOG_MCP_TOOL_PROFILE"] = "maintenance"
+        os.environ["DIMOS_SEMANTIC_WORLD_PATH"] = str(cls._semantic_store)
+        os.environ["DIMOS_MAP_ID"] = "replay-map"
+        os.environ["DIMOS_MAP_VERSION"] = "replay-v1"
+        os.environ["DIMOS_PREMAP_FILE"] = str(cls._premap_file)
+        cls._write_replay_semantic_store()
 
         from dimos.agents.mcp.mcp_adapter import McpAdapter
         from dimos.core.coordination.module_coordinator import ModuleCoordinator
@@ -63,6 +87,47 @@ class DimosIntegrationTests(unittest.TestCase):
             os.environ.pop("LISTEN_HOST", None)
         else:
             os.environ["LISTEN_HOST"] = cls._previous_listen_host_env
+        for name, previous_value in cls._previous_semantic_env.items():
+            if previous_value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous_value
+        cls._temp_dir.cleanup()
+
+    @classmethod
+    def _write_replay_semantic_store(cls) -> None:
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        cls._semantic_store.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "places": [
+                        {
+                            "entity_id": "place-replay-test-point",
+                            "name": "测试点",
+                            "aliases": ["演示点"],
+                            "map_id": "replay-map",
+                            "map_version": "replay-v1",
+                            "pose": {
+                                "frame_id": "map",
+                                "ts": 1234.5,
+                                "x": 1.0,
+                                "y": 2.0,
+                                "z": 0.0,
+                                "qx": 0.0,
+                                "qy": 0.0,
+                                "qz": 0.0,
+                                "qw": 1.0,
+                            },
+                            "confirmation": "confirmed",
+                            "confirmed_at": now,
+                            "updated_at": now,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         self._adapter.call(
@@ -83,6 +148,7 @@ class DimosIntegrationTests(unittest.TestCase):
                 "move_backward",
                 "stop_all",
                 "motion_status",
+                "get_robot_summary",
                 "server_status",
                 "list_modules",
                 "agent_send",
@@ -94,14 +160,63 @@ class DimosIntegrationTests(unittest.TestCase):
                 "observe",
                 "tag_location",
                 "navigate_with_text",
+                "stop_navigation",
                 "begin_exploration",
                 "start_patrol",
                 "look_out_for",
                 "return_to_start",
                 "return_to_user_and_greet",
                 "start_stroll",
+                "start_task",
+                "pause_task",
+                "resume_task",
+                "cancel_task",
+                "get_task_status",
+                "list_semantic_places",
+                "confirm_semantic_place",
             },
         )
+
+    def test_server_status_identifies_the_runtime_owner_and_module_count(self) -> None:
+        result = self._adapter.call(
+            "tools/call",
+            {
+                "name": "server_status",
+                "arguments": {},
+            },
+        )
+        payload = json.loads(result["result"]["content"][0]["text"])
+
+        self.assertIsInstance(payload["pid"], int)
+        self.assertEqual(payload["mode"], "dry-run")
+        self.assertIsNone(payload["robot_ip"])
+        self.assertEqual(payload["module_count"], len(payload["modules"]))
+        self.assertRegex(payload["started_at"], r"Z$")
+        self.assertEqual(payload["runtime_owner"]["pid"], payload["pid"])
+        self.assertEqual(payload["runtime_owner"]["mode"], "dry-run")
+        self.assertEqual(payload["tool_profile"], "maintenance")
+
+    def test_go2_blueprint_contains_exactly_one_connection_and_mcp_server(self) -> None:
+        from dimos_dog_mcp import blueprint as blueprint_module
+        from dimos_dog_mcp.blueprint import Go2DependenciesUnavailableError
+
+        previous_mode = os.environ.get("DIMOS_DOG_MCP_MODE")
+        os.environ["DIMOS_DOG_MCP_MODE"] = "go2"
+        try:
+            try:
+                blueprint = blueprint_module.build_blueprint()
+            except Go2DependenciesUnavailableError:
+                self.skipTest("requires dimos-dog-mcp[go2]")
+        finally:
+            if previous_mode is None:
+                os.environ.pop("DIMOS_DOG_MCP_MODE", None)
+            else:
+                os.environ["DIMOS_DOG_MCP_MODE"] = previous_mode
+        module_names = [atom.module.__name__ for atom in blueprint.blueprints]
+        self.assertEqual(module_names.count("GO2Connection"), 1)
+        self.assertEqual(module_names.count("SemanticWorld"), 1)
+        self.assertEqual(module_names.count("MissionExecutor"), 1)
+        self.assertEqual(module_names.count("DogMcpServer"), 1)
 
     def test_dry_run_stop_all_stops_motion_and_reports_other_activities_as_not_configured(
         self,
@@ -115,21 +230,82 @@ class DimosIntegrationTests(unittest.TestCase):
         )
         payload = json.loads(result["result"]["content"][0]["text"])
         self.assertEqual(payload["status"], "stopped")
+        self.assertEqual(payload["results"]["mission"]["status"], "success")
         self.assertEqual(payload["results"]["motion"]["status"], "success")
         self.assertEqual(
             {
                 name: item["status"]
                 for name, item in payload["results"].items()
-                if name != "motion"
+                if name not in {"mission", "motion"}
             },
             {
                 "exploration": "not_configured",
                 "patrol": "not_configured",
                 "stroll": "not_configured",
+                "follow": "not_configured",
                 "lookout": "not_configured",
                 "navigation": "not_configured",
             },
         )
+
+    def test_mcp_replay_runs_one_task_through_start_status_and_cancel(self) -> None:
+        task_id = "task-replay-semantic-001"
+        start = self._adapter.call(
+            "tools/call",
+            {
+                "name": "start_task",
+                "arguments": {
+                    "task_json": json.dumps(
+                        {
+                            "task_id": task_id,
+                            "kind": "go_to_place",
+                            "destination": "演示点",
+                        },
+                        ensure_ascii=False,
+                    )
+                },
+            },
+        )
+        started = json.loads(start["result"]["content"][0]["text"])
+        self.assertTrue(started["accepted"])
+        self.assertEqual(started["task_id"], task_id)
+
+        status: dict[str, object] = {}
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            result = self._adapter.call(
+                "tools/call",
+                {"name": "get_task_status", "arguments": {}},
+            )
+            status = json.loads(result["result"]["content"][0]["text"])
+            if status.get("state") == "navigating":
+                break
+            time.sleep(0.01)
+        self.assertEqual(status["task"]["task_id"], task_id)
+        self.assertEqual(status["state"], "navigating")
+
+        cancelled_result = self._adapter.call(
+            "tools/call",
+            {
+                "name": "cancel_task",
+                "arguments": {"task_id": task_id},
+            },
+        )
+        cancelled = json.loads(
+            cancelled_result["result"]["content"][0]["text"]
+        )
+        self.assertEqual(cancelled["task"]["task_id"], task_id)
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertFalse(cancelled["active"])
+        self.assertTrue(cancelled["navigation_idle"])
+
+        final_result = self._adapter.call(
+            "tools/call",
+            {"name": "get_task_status", "arguments": {}},
+        )
+        final_status = json.loads(final_result["result"]["content"][0]["text"])
+        self.assertEqual(final_status["task"]["task_id"], task_id)
+        self.assertEqual(final_status["state"], "cancelled")
 
     def test_dry_run_navigation_tool_reports_that_go2_mode_is_required(self) -> None:
         result = self._adapter.call(
@@ -175,12 +351,11 @@ class DimosIntegrationTests(unittest.TestCase):
         result = self._adapter.call("tools/list")
         self.assertIn("tools", result["result"])
 
-    def test_go2_blueprint_composes_the_official_navigation_stack_without_starting_it(self) -> None:
-        from dimos.agents.agent_spec import AgentSpec
+    def test_go2_blueprint_composes_the_stage2_navigation_stack_without_starting_it(
+        self,
+    ) -> None:
         from dimos.core.coordination.module_coordinator import _resolve_single_ref
-        from dimos.spec.utils import spec_structural_compliance
         from dimos_dog_mcp import blueprint as blueprint_module
-        from dimos_dog_mcp.agent_bridge import StandaloneAgentBridge
         from dimos_dog_mcp.blueprint import Go2DependenciesUnavailableError
 
         previous_mode = os.environ.get("DIMOS_DOG_MCP_MODE")
@@ -197,11 +372,6 @@ class DimosIntegrationTests(unittest.TestCase):
                 os.environ["DIMOS_DOG_MCP_MODE"] = previous_mode
 
         module_names = {atom.module.__name__ for atom in blueprint.blueprints}
-        agent_spec_providers = {
-            atom.module.__name__
-            for atom in blueprint.active_blueprints
-            if spec_structural_compliance(atom.module, AgentSpec)
-        }
         self.assertTrue(
             {
                 "GO2Connection",
@@ -211,44 +381,34 @@ class DimosIntegrationTests(unittest.TestCase):
                 "WavefrontFrontierExplorer",
                 "PatrollingModule",
                 "MovementManager",
-                "SpatialMemory",
-                "NavigationSkillContainer",
                 "UnitreeSkillContainer",
-                "PerceiveLoopSkill",
                 "HomeNavigationSkill",
-                "ReturnToUserAndGreetSkill",
+                "RobotSummarySkill",
                 "StrollSkill",
                 "DogMotionSkill",
                 "Go2StopAllSkill",
+                "SpatialMemory",
+                "NavigationSkillContainer",
+                "SemanticWorld",
+                "MissionExecutor",
                 "DogMcpServer",
             }
             <= module_names
         )
         self.assertNotIn("SpeakSkill", module_names)
-        self.assertEqual(agent_spec_providers, {"StandaloneAgentBridge"})
-        perceive_loop = next(
-            atom for atom in blueprint.active_blueprints if atom.module.__name__ == "PerceiveLoopSkill"
-        )
-        standalone_agent_bridge = next(
-            atom
-            for atom in blueprint.active_blueprints
-            if atom.module is StandaloneAgentBridge
-        )
-        agent_ref = next(
-            module_ref
-            for module_ref in perceive_loop.module_refs
-            if module_ref.name == "_agent_spec"
-        )
-        self.assertEqual(
-            _resolve_single_ref(
-                perceive_loop,
-                agent_ref,
-                agent_ref.spec,
-                blueprint,
-                set(),
-            ),
-            standalone_agent_bridge.name,
-        )
+        self.assertNotIn("PerceiveLoopSkill", module_names)
+        self.assertNotIn("ReturnToUserAndGreetSkill", module_names)
+        self.assertNotIn("StandaloneAgentBridge", module_names)
+
+        for atom in blueprint.active_blueprints:
+            for module_ref in atom.module_refs:
+                _resolve_single_ref(
+                    atom,
+                    module_ref,
+                    module_ref.spec,
+                    blueprint,
+                    set(),
+                )
 
     def test_dry_run_does_not_start_motion(self) -> None:
         result = self._adapter.call(

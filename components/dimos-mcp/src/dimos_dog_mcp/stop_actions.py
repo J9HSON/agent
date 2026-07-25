@@ -7,9 +7,11 @@ import json
 
 
 STOP_COMPONENT_NAMES = (
+    "mission",
     "exploration",
     "patrol",
     "stroll",
+    "follow",
     "lookout",
     "navigation",
     "motion",

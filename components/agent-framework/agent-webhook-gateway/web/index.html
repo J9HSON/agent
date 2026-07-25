@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta name="color-scheme" content="dark" />
+		<title>Go2 Agent 控制台</title>
+		<link rel="stylesheet" href="/styles.css" />
+	</head>
+	<body>
+		<header class="topbar">
+			<div>
+				<p class="eyebrow">DIMOS / ONE COMMANDER</p>
+				<h1>Go2 Agent 控制台</h1>
+			</div>
+			<div class="connection" aria-live="polite">
+				<span id="gateway-dot" class="status-dot"></span>
+				<span id="gateway-status">正在连接 Agent Gateway</span>
+			</div>
+		</header>
+
+		<main>
+			<section class="map-panel" aria-labelledby="map-title">
+				<div class="panel-heading">
+					<div>
+						<p class="eyebrow">OFFICIAL DIMOS VIEWER</p>
+						<h2 id="map-title">实时地图</h2>
+					</div>
+					<button id="reload-map" class="quiet-button" type="button">重连地图</button>
+				</div>
+				<div class="map-stage">
+					<iframe id="map-frame" title="DimOS 官方实时地图"></iframe>
+					<div id="map-placeholder" class="map-placeholder">
+						<span class="map-pulse"></span>
+						<strong id="map-status">等待 DimOS 地图服务</strong>
+						<small>启动唯一 Product Runtime 后会自动显示。</small>
+					</div>
+				</div>
+			</section>
+
+			<aside class="command-panel" aria-labelledby="command-title">
+				<div class="panel-heading compact">
+					<div>
+						<p class="eyebrow">AGENT INPUT</p>
+						<h2 id="command-title">告诉机器狗要做什么</h2>
+					</div>
+				</div>
+
+				<form id="command-form">
+					<label for="command-input">任务指令</label>
+					<textarea
+						id="command-input"
+						name="command"
+						rows="6"
+						maxlength="2000"
+						placeholder="例如：往前走；停下来；去会场门口；把这里标记为展台"
+						required
+					></textarea>
+					<p class="input-hint">⌘ + Enter 发送。任务由现有 Agent 分析并通过唯一 MCP Runtime 执行。</p>
+					<div class="primary-actions">
+						<button id="submit-command" class="execute-button" type="submit">发送给 Agent</button>
+						<button id="stop-command" class="stop-button" type="button">停止当前任务</button>
+					</div>
+				</form>
+
+				<section class="task-card" aria-live="polite">
+					<div class="task-card-heading">
+						<span>当前指令</span>
+						<strong id="task-state" data-state="idle">待命</strong>
+					</div>
+					<p id="task-text">尚未发送指令。</p>
+					<dl>
+						<div>
+							<dt>Instruction</dt>
+							<dd id="instruction-id">—</dd>
+						</div>
+						<div>
+							<dt>Task</dt>
+							<dd id="task-id">—</dd>
+						</div>
+						<div>
+							<dt>Destination</dt>
+							<dd id="task-destination">—</dd>
+						</div>
+					</dl>
+				</section>
+
+				<section class="reply-card" aria-live="polite">
+					<span>Agent 回复</span>
+					<p id="agent-reply">等待任务输入。</p>
+				</section>
+			</aside>
+		</main>
+
+		<script src="/app.js"></script>
+	</body>
+</html>

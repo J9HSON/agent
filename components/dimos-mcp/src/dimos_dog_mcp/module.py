@@ -93,14 +93,27 @@ class DogMotionSkill(Module):
         """Return local motion-command state; this is not a robot telemetry query."""
 
         status = self._runtime.status()
+        last_command = status.last_command
         return json.dumps(
             {
                 "mode": self._mode.value,
                 "real_motion_enabled": self._mode is RuntimeMode.GO2,
                 "active": status.active,
+                "command_state": "active" if status.active else "idle",
                 "linear_x_mps": status.linear_x,
                 "linear_y_mps": status.linear_y,
                 "angular_z_radps": status.angular_z,
+                "last_command": (
+                    {
+                        "linear_x_mps": last_command.linear_x,
+                        "linear_y_mps": last_command.linear_y,
+                        "angular_z_radps": last_command.angular_z,
+                        "duration_s": last_command.duration_s,
+                    }
+                    if last_command is not None
+                    else None
+                ),
+                "last_outcome": status.last_outcome,
             }
         )
 

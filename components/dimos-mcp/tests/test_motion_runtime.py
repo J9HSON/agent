@@ -6,6 +6,7 @@ import unittest
 from dimos_dog_mcp.config import (
     McpServerConfig,
     RuntimeMode,
+    configure_robot_no_proxy,
     read_mcp_server_config,
     read_runtime_mode,
 )
@@ -29,6 +30,8 @@ class MotionRuntimeTests(unittest.TestCase):
         self.assertEqual(published[0].linear_x, 0.1)
         self.assertEqual(published[-1], VelocityCommand.zero())
         self.assertFalse(runtime.status().active)
+        self.assertEqual(runtime.status().last_outcome, "completed")
+        self.assertEqual(runtime.status().last_command, VelocityCommand(0.1, 0.0, 0.0, 0.03))
 
     def test_stop_preempts_active_motion_and_publishes_zero(self) -> None:
         published: list[VelocityCommand] = []
@@ -46,6 +49,7 @@ class MotionRuntimeTests(unittest.TestCase):
 
         self.assertFalse(runtime.status().active)
         self.assertEqual(published[-1], VelocityCommand.zero())
+        self.assertEqual(runtime.status().last_outcome, "stopped")
 
     def test_background_motion_expires_with_a_zero_command(self) -> None:
         published: list[VelocityCommand] = []
@@ -137,3 +141,21 @@ class MotionRuntimeTests(unittest.TestCase):
             with self.subTest(environment=environment):
                 with self.assertRaises(ValueError):
                     read_mcp_server_config(environment)
+
+    def test_robot_ip_is_added_to_both_no_proxy_spellings(self) -> None:
+        environment = {
+            "NO_PROXY": "localhost,127.0.0.1",
+            "no_proxy": "localhost",
+        }
+
+        configure_robot_no_proxy("192.168.12.1", environment)
+        configure_robot_no_proxy("192.168.12.1", environment)
+
+        self.assertEqual(
+            environment["NO_PROXY"],
+            "localhost,127.0.0.1,192.168.12.1",
+        )
+        self.assertEqual(
+            environment["no_proxy"],
+            "localhost,192.168.12.1",
+        )

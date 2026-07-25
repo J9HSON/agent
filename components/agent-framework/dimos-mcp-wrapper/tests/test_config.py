@@ -12,6 +12,7 @@ class WrapperConfigTests(unittest.TestCase):
         config = read_wrapper_config({})
 
         self.assertEqual(config.timeout_s, 120.0)
+        self.assertEqual(config.tool_profile.value, "product")
 
     def test_reads_explicit_upstream_endpoint_port_and_timeout(self) -> None:
         config = read_wrapper_config(
@@ -19,9 +20,15 @@ class WrapperConfigTests(unittest.TestCase):
                 "DIMOS_MCP_WRAPPER_UPSTREAM_URL": "http://robot.local:9990/mcp",
                 "DIMOS_MCP_WRAPPER_PORT": "10001",
                 "DIMOS_MCP_WRAPPER_TIMEOUT_S": "3.5",
+                "DIMOS_MCP_WRAPPER_PROFILE": "validation",
             }
         )
 
         self.assertEqual(config.upstream_url, "http://robot.local:9990/mcp")
         self.assertEqual(config.mcp_port, 10001)
         self.assertEqual(config.timeout_s, 3.5)
+        self.assertEqual(config.tool_profile.value, "validation")
+
+    def test_rejects_an_unknown_tool_profile(self) -> None:
+        with self.assertRaisesRegex(ValueError, "product, validation"):
+            read_wrapper_config({"DIMOS_MCP_WRAPPER_PROFILE": "everything"})

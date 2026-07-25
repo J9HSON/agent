@@ -49,6 +49,11 @@ class DogMcpTools:
 
         return self._forwarder.forward("motion_status", {})
 
+    def get_robot_summary(self) -> str:
+        """Forward the upstream odometry-based robot summary."""
+
+        return self._forwarder.forward("get_robot_summary", {})
+
     def server_status(self) -> str:
         return self._forwarder.forward("server_status", {})
 
@@ -82,6 +87,11 @@ class DogMcpTools:
     def observe(self) -> str:
         return self._forwarder.forward("observe", {})
 
+    def follow_person(self, query: str) -> str:
+        """Start the upstream official visual person-follow skill."""
+
+        return self._forwarder.forward("follow_person", {"query": query})
+
     def tag_location(self, location_name: str) -> str:
         """Forward a request to tag the robot's current mapped location."""
 
@@ -91,6 +101,11 @@ class DogMcpTools:
         """Forward a semantic navigation request to the official DIMOS stack."""
 
         return self._forwarder.forward("navigate_with_text", {"query": query})
+
+    def stop_navigation(self) -> str:
+        """Forward one official navigation-cancel request."""
+
+        return self._forwarder.forward("stop_navigation", {})
 
     def return_to_start(self) -> str:
         """Forward navigation to the upstream process's captured start pose."""
@@ -124,3 +139,31 @@ class DogMcpTools:
 
     def start_stroll(self) -> str:
         return self._forwarder.forward("start_stroll", {})
+
+    def start_task(self, task_json: str) -> str:
+        """Forward one canonical TaskSpec JSON payload."""
+
+        return self._forwarder.forward("start_task", {"task_json": task_json})
+
+    def pause_task(self, task_id: str) -> str:
+        return self._forwarder.forward("pause_task", {"task_id": task_id})
+
+    def resume_task(self, task_id: str) -> str:
+        return self._forwarder.forward("resume_task", {"task_id": task_id})
+
+    def cancel_task(self, task_id: str) -> str:
+        return self._forwarder.forward("cancel_task", {"task_id": task_id})
+
+    def get_task_status(self) -> str:
+        return self._forwarder.forward("get_task_status", {})
+
+    def list_semantic_places(self) -> str:
+        return self._forwarder.forward("list_semantic_places", {})
+
+    def confirm_semantic_place(self, place_json: str) -> str:
+        """Forward one operator-confirmed semantic-place record."""
+
+        return self._forwarder.forward(
+            "confirm_semantic_place",
+            {"place_json": place_json},
+        )

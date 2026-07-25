@@ -2,13 +2,26 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { HealthWebhookNotification } from "./health-contract.ts";
+import {
+	type MissionTaskSnapshot,
+	type MissionTaskSpec,
+	type TaskState,
+	totalRouteLegs,
+	type VisitRouteParameters,
+} from "./task-contract.ts";
 import type { AgentReplyEvent, ExternalInstruction } from "./types.ts";
 
 type InstructionRow = {
 	instruction_id: string;
 	text: string;
 	is_stop: number;
+};
+
+type InstructionViewRow = {
+	instruction_id: string;
+	text: string;
+	status: InstructionLifecycleStatus;
+	received_at: string;
 };
 
 type OutboxRow = {
@@ -19,17 +32,49 @@ type OutboxRow = {
 	attempts: number;
 };
 
+type TaskBindingRow = {
+	instruction_id: string;
+	task_id: string;
+	task_json: string;
+	compile_status: TaskBindingStatus;
+	last_state: string | null;
+	last_snapshot_json: string | null;
+	route_json: string | null;
+	route_leg_index: number | null;
+	created_at: string;
+	updated_at: string;
+};
+
+export type TaskBindingStatus = "compiled" | "submitted" | "monitoring" | "terminal" | "failed";
+export type InstructionLifecycleStatus = "pending" | "processing" | "completed";
+
+export interface StoredTaskBinding {
+	instructionId: string;
+	taskId: string;
+	task: MissionTaskSpec;
+	compileStatus: TaskBindingStatus;
+	lastState?: TaskState;
+	lastSnapshot?: MissionTaskSnapshot;
+	route?: VisitRouteParameters;
+	routeLegIndex?: number;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface StoredInstructionView {
+	instructionId: string;
+	text: string;
+	status: InstructionLifecycleStatus;
+	receivedAt: string;
+	task?: StoredTaskBinding;
+	reply?: AgentReplyEvent;
+}
+
 export type AcceptInstructionResult = "accepted" | "duplicate" | "conflict";
 export interface PendingReply {
 	event: AgentReplyEvent;
 	attempts: number;
 }
-export interface PendingHealthNotification {
-	notificationId: string;
-	rawBody: Buffer;
-	attempts: number;
-}
-export type AcceptHealthNotificationResult = "accepted" | "duplicate" | "conflict";
 
 export class GatewayStore {
 	private readonly database: DatabaseSync;
@@ -58,38 +103,26 @@ export class GatewayStore {
 				next_attempt_at_ms INTEGER NOT NULL DEFAULT 0,
 					delivered_at TEXT
 				);
-				CREATE TABLE IF NOT EXISTS health_notifications (
-					notification_id TEXT PRIMARY KEY,
-					notification_sequence INTEGER NOT NULL,
-					event_id TEXT NOT NULL,
-					event_revision INTEGER NOT NULL,
-					wearer_id TEXT NOT NULL,
-					raw_body_sha256 TEXT NOT NULL,
-					raw_body BLOB NOT NULL,
-					received_at TEXT NOT NULL
-				);
-				CREATE TABLE IF NOT EXISTS health_queue (
-					notification_id TEXT PRIMARY KEY REFERENCES health_notifications(notification_id),
-					status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed')),
-					attempts INTEGER NOT NULL DEFAULT 0,
-					next_attempt_at_ms INTEGER NOT NULL DEFAULT 0,
-					processed_at TEXT,
-					outcome TEXT
-				);
-				CREATE TABLE IF NOT EXISTS health_event_revisions (
-					event_id TEXT PRIMARY KEY,
-					highest_revision INTEGER NOT NULL
-				);
-				CREATE TABLE IF NOT EXISTS health_audit (
-					sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-					notification_id TEXT NOT NULL REFERENCES health_notifications(notification_id),
-					event_id TEXT NOT NULL,
-					event_revision INTEGER NOT NULL,
-					outcome TEXT NOT NULL,
-					detail TEXT NOT NULL,
-					processed_at TEXT NOT NULL
-				);
+			CREATE TABLE IF NOT EXISTS instruction_task_bindings (
+				instruction_id TEXT PRIMARY KEY REFERENCES instructions(instruction_id),
+				task_id TEXT NOT NULL UNIQUE,
+				task_json TEXT NOT NULL,
+				compile_status TEXT NOT NULL CHECK (
+					compile_status IN ('compiled', 'submitted', 'monitoring', 'terminal', 'failed')
+				),
+				last_state TEXT,
+				last_snapshot_json TEXT,
+				route_json TEXT,
+				route_leg_index INTEGER CHECK (route_leg_index IS NULL OR route_leg_index >= 0),
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			);
 			`);
+		this.ensureTaskBindingColumn("route_json", "TEXT");
+		this.ensureTaskBindingColumn(
+			"route_leg_index",
+			"INTEGER CHECK (route_leg_index IS NULL OR route_leg_index >= 0)",
+		);
 	}
 
 	acceptInstruction(instruction: ExternalInstruction, isStop: boolean, receivedAt: string): AcceptInstructionResult {
@@ -183,6 +216,221 @@ export class GatewayStore {
 		}
 	}
 
+	createTaskBinding(instructionId: string, task: MissionTaskSpec, createdAt: string): StoredTaskBinding {
+		const taskJson = JSON.stringify(task);
+		this.database.exec("BEGIN IMMEDIATE");
+		try {
+			const instruction = this.database
+				.prepare("SELECT status FROM instructions WHERE instruction_id = ?")
+				.get(instructionId) as { status: string } | undefined;
+			if (!instruction) {
+				throw new Error(`Unknown instruction_id ${instructionId}`);
+			}
+			if (instruction.status !== "processing") {
+				throw new Error(`Instruction ${instructionId} is not in processing state`);
+			}
+			const existing = this.readTaskBindingRow(instructionId);
+			if (existing) {
+				if (existing.task_id !== task.task_id || existing.task_json !== taskJson) {
+					throw new Error(`Instruction ${instructionId} is already bound to another task`);
+				}
+				this.database.exec("COMMIT");
+				return this.toTaskBinding(existing);
+			}
+			this.database
+				.prepare(
+					`INSERT INTO instruction_task_bindings (
+						instruction_id, task_id, task_json, compile_status,
+						created_at, updated_at
+					) VALUES (?, ?, ?, 'compiled', ?, ?)`,
+				)
+				.run(instructionId, task.task_id, taskJson, createdAt, createdAt);
+			const created = this.readTaskBindingRow(instructionId);
+			if (!created) {
+				throw new Error("Task binding insert did not persist");
+			}
+			this.database.exec("COMMIT");
+			return this.toTaskBinding(created);
+		} catch (error) {
+			this.database.exec("ROLLBACK");
+			throw error;
+		}
+	}
+
+	createRouteBinding(
+		instructionId: string,
+		route: VisitRouteParameters,
+		task: MissionTaskSpec,
+		createdAt: string,
+	): StoredTaskBinding {
+		const taskJson = JSON.stringify(task);
+		const routeJson = JSON.stringify(route);
+		this.database.exec("BEGIN IMMEDIATE");
+		try {
+			const instruction = this.database
+				.prepare("SELECT status FROM instructions WHERE instruction_id = ?")
+				.get(instructionId) as { status: string } | undefined;
+			if (!instruction) {
+				throw new Error(`Unknown instruction_id ${instructionId}`);
+			}
+			if (instruction.status !== "processing") {
+				throw new Error(`Instruction ${instructionId} is not in processing state`);
+			}
+			const existing = this.readTaskBindingRow(instructionId);
+			if (existing) {
+				if (
+					existing.task_id !== task.task_id ||
+					existing.task_json !== taskJson ||
+					existing.route_json !== routeJson ||
+					existing.route_leg_index !== 0
+				) {
+					throw new Error(`Instruction ${instructionId} is already bound to another task or route`);
+				}
+				this.database.exec("COMMIT");
+				return this.toTaskBinding(existing);
+			}
+			this.database
+				.prepare(
+					`INSERT INTO instruction_task_bindings (
+						instruction_id, task_id, task_json, compile_status,
+						route_json, route_leg_index, created_at, updated_at
+					) VALUES (?, ?, ?, 'compiled', ?, 0, ?, ?)`,
+				)
+				.run(instructionId, task.task_id, taskJson, routeJson, createdAt, createdAt);
+			const created = this.readTaskBindingRow(instructionId);
+			if (!created) {
+				throw new Error("Route binding insert did not persist");
+			}
+			this.database.exec("COMMIT");
+			return this.toTaskBinding(created);
+		} catch (error) {
+			this.database.exec("ROLLBACK");
+			throw error;
+		}
+	}
+
+	advanceRouteBinding(
+		instructionId: string,
+		task: MissionTaskSpec,
+		legIndex: number,
+		updatedAt: string,
+	): StoredTaskBinding {
+		this.database.exec("BEGIN IMMEDIATE");
+		try {
+			const existing = this.readTaskBindingRow(instructionId);
+			if (!existing || !existing.route_json || existing.route_leg_index === null) {
+				throw new Error(`Instruction ${instructionId} has no route binding`);
+			}
+			const route = JSON.parse(existing.route_json) as VisitRouteParameters;
+			if (
+				!Number.isInteger(legIndex) ||
+				legIndex !== existing.route_leg_index + 1 ||
+				legIndex >= totalRouteLegs(route)
+			) {
+				throw new Error(`Route ${instructionId} cannot advance to leg ${legIndex}`);
+			}
+			const result = this.database
+				.prepare(
+					`UPDATE instruction_task_bindings
+					 SET task_id = ?, task_json = ?, compile_status = 'compiled',
+						 last_state = NULL, last_snapshot_json = NULL,
+						 route_leg_index = ?, updated_at = ?
+					 WHERE instruction_id = ? AND task_id = ?`,
+				)
+				.run(task.task_id, JSON.stringify(task), legIndex, updatedAt, instructionId, existing.task_id);
+			if (result.changes !== 1) {
+				throw new Error(`Route ${instructionId} changed while advancing`);
+			}
+			const updated = this.readTaskBindingRow(instructionId);
+			if (!updated) {
+				throw new Error("Advanced route binding disappeared");
+			}
+			this.database.exec("COMMIT");
+			return this.toTaskBinding(updated);
+		} catch (error) {
+			this.database.exec("ROLLBACK");
+			throw error;
+		}
+	}
+
+	markTaskSubmitted(taskId: string, updatedAt: string): void {
+		this.updateTaskBindingStatus(taskId, "submitted", updatedAt);
+	}
+
+	recordTaskSnapshot(taskId: string, snapshot: MissionTaskSnapshot, updatedAt: string): void {
+		const status: TaskBindingStatus =
+			!snapshot.active &&
+			(snapshot.state === "completed" || snapshot.state === "failed" || snapshot.state === "cancelled")
+				? "terminal"
+				: "monitoring";
+		const result = this.database
+			.prepare(
+				`UPDATE instruction_task_bindings
+				 SET compile_status = ?, last_state = ?, last_snapshot_json = ?,
+					 updated_at = ?
+				 WHERE task_id = ?`,
+			)
+			.run(status, snapshot.state, JSON.stringify(snapshot), updatedAt, taskId);
+		if (result.changes !== 1) {
+			throw new Error(`Unknown task_id ${taskId}`);
+		}
+	}
+
+	markTaskBindingFailed(taskId: string, updatedAt: string): void {
+		this.updateTaskBindingStatus(taskId, "failed", updatedAt);
+	}
+
+	getTaskBinding(instructionId: string): StoredTaskBinding | undefined {
+		const row = this.readTaskBindingRow(instructionId);
+		return row ? this.toTaskBinding(row) : undefined;
+	}
+
+	getInstructionView(instructionId: string): StoredInstructionView | undefined {
+		const instruction = this.database
+			.prepare(
+				`SELECT instruction_id, text, status, received_at
+				 FROM instructions
+				 WHERE instruction_id = ?`,
+			)
+			.get(instructionId) as InstructionViewRow | undefined;
+		if (!instruction) {
+			return undefined;
+		}
+		const reply = this.database
+			.prepare(
+				`SELECT reply_id, instruction_id, text, completed_at, attempts
+				 FROM outbox
+				 WHERE instruction_id = ?`,
+			)
+			.get(instructionId) as OutboxRow | undefined;
+		const task = this.readTaskBindingRow(instructionId);
+		return {
+			instructionId: instruction.instruction_id,
+			text: instruction.text,
+			status: instruction.status,
+			receivedAt: instruction.received_at,
+			task: task ? this.toTaskBinding(task) : undefined,
+			reply: reply ? this.toReplyEvent(reply) : undefined,
+		};
+	}
+
+	nextRecoverableTaskBinding(): StoredTaskBinding | undefined {
+		const row = this.database
+			.prepare(
+				`SELECT b.instruction_id, b.task_id, b.task_json, b.compile_status,
+						b.last_state, b.last_snapshot_json, b.route_json,
+						b.route_leg_index, b.created_at, b.updated_at
+				 FROM instruction_task_bindings AS b
+				 JOIN instructions AS i ON i.instruction_id = b.instruction_id
+				 WHERE i.status = 'processing'
+				   AND b.compile_status IN ('compiled', 'submitted', 'monitoring')
+				 ORDER BY i.sequence
+				 LIMIT 1`,
+			)
+			.get() as TaskBindingRow | undefined;
+		return row ? this.toTaskBinding(row) : undefined;
+	}
+
 	nextDueReply(nowMs: number): PendingReply | undefined {
 		const row = this.database
 			.prepare(
@@ -241,161 +489,10 @@ export class GatewayStore {
 		const rows = this.database
 			.prepare("SELECT instruction_id FROM instructions WHERE status = 'processing' ORDER BY sequence")
 			.all() as Array<{ instruction_id: string }>;
-		for (const row of rows) {
+		const unboundRows = rows.filter((row) => this.readTaskBindingRow(row.instruction_id) === undefined);
+		for (const row of unboundRows) {
 			this.completeInstruction(row.instruction_id, fallbackText, completedAt);
 		}
-	}
-
-	acceptHealthNotification(
-		notification: HealthWebhookNotification,
-		rawBody: Buffer,
-		rawBodySha256: string,
-		receivedAt: string,
-	): AcceptHealthNotificationResult {
-		this.database.exec("BEGIN IMMEDIATE");
-		try {
-			const inserted = this.database
-				.prepare(
-					`INSERT INTO health_notifications (
-						notification_id, notification_sequence, event_id, event_revision,
-						wearer_id, raw_body_sha256, raw_body, received_at
-					) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-					ON CONFLICT(notification_id) DO NOTHING`,
-				)
-				.run(
-					notification.notification_id,
-					notification.notification_sequence,
-					notification.event_id,
-					notification.event_revision,
-					notification.wearer_id,
-					rawBodySha256,
-					rawBody,
-					receivedAt,
-				);
-			if (Number(inserted.changes) === 1) {
-				this.database
-					.prepare("INSERT INTO health_queue (notification_id, status) VALUES (?, 'pending')")
-					.run(notification.notification_id);
-				this.database.exec("COMMIT");
-				return "accepted";
-			}
-			const existing = this.database
-				.prepare("SELECT raw_body_sha256 FROM health_notifications WHERE notification_id = ?")
-				.get(notification.notification_id) as { raw_body_sha256: string };
-			this.database.exec("COMMIT");
-			return existing.raw_body_sha256 === rawBodySha256 ? "duplicate" : "conflict";
-		} catch (error) {
-			this.database.exec("ROLLBACK");
-			throw error;
-		}
-	}
-
-	claimNextHealthNotification(nowMs: number): PendingHealthNotification | undefined {
-		this.database.exec("BEGIN IMMEDIATE");
-		try {
-			const row = this.database
-				.prepare(
-					`SELECT n.notification_id, n.raw_body, q.attempts
-					 FROM health_queue q
-					 JOIN health_notifications n ON n.notification_id = q.notification_id
-					 WHERE q.status = 'pending' AND q.next_attempt_at_ms <= ?
-					 ORDER BY n.notification_sequence, n.notification_id
-					 LIMIT 1`,
-				)
-				.get(nowMs) as { notification_id: string; raw_body: Uint8Array; attempts: number } | undefined;
-			if (!row) {
-				this.database.exec("COMMIT");
-				return undefined;
-			}
-			this.database
-				.prepare("UPDATE health_queue SET status = 'processing' WHERE notification_id = ? AND status = 'pending'")
-				.run(row.notification_id);
-			this.database.exec("COMMIT");
-			return {
-				notificationId: row.notification_id,
-				rawBody: Buffer.from(row.raw_body),
-				attempts: row.attempts,
-			};
-		} catch (error) {
-			this.database.exec("ROLLBACK");
-			throw error;
-		}
-	}
-
-	highestProcessedHealthEventRevision(eventId: string): number | undefined {
-		const row = this.database
-			.prepare("SELECT highest_revision FROM health_event_revisions WHERE event_id = ?")
-			.get(eventId) as { highest_revision: number } | undefined;
-		return row?.highest_revision;
-	}
-
-	completeHealthNotification(
-		notification: HealthWebhookNotification,
-		outcome: string,
-		detail: string,
-		processedAt: string,
-	): void {
-		this.database.exec("BEGIN IMMEDIATE");
-		try {
-			this.database
-				.prepare(
-					`INSERT INTO health_audit (
-						notification_id, event_id, event_revision, outcome, detail, processed_at
-					) VALUES (?, ?, ?, ?, ?, ?)`,
-				)
-				.run(
-					notification.notification_id,
-					notification.event_id,
-					notification.event_revision,
-					outcome,
-					detail,
-					processedAt,
-				);
-			this.database
-				.prepare(
-					`INSERT INTO health_event_revisions (event_id, highest_revision)
-					 VALUES (?, ?)
-					 ON CONFLICT(event_id) DO UPDATE SET
-						highest_revision = MAX(highest_revision, excluded.highest_revision)`,
-				)
-				.run(notification.event_id, notification.event_revision);
-			this.database
-				.prepare(
-					`UPDATE health_queue
-					 SET status = 'completed', processed_at = ?, outcome = ?
-					 WHERE notification_id = ?`,
-				)
-				.run(processedAt, outcome, notification.notification_id);
-			this.database.exec("COMMIT");
-		} catch (error) {
-			this.database.exec("ROLLBACK");
-			throw error;
-		}
-	}
-
-	retryHealthNotification(notificationId: string, nextAttemptAtMs: number): void {
-		this.database
-			.prepare(
-				`UPDATE health_queue
-				 SET status = 'pending', attempts = attempts + 1, next_attempt_at_ms = ?
-				 WHERE notification_id = ?`,
-			)
-			.run(nextAttemptAtMs, notificationId);
-	}
-
-	recoverInterruptedHealthNotifications(): void {
-		this.database.prepare("UPDATE health_queue SET status = 'pending' WHERE status = 'processing'").run();
-	}
-
-	nextHealthAttemptAtMs(): number | undefined {
-		const row = this.database
-			.prepare(
-				`SELECT MIN(next_attempt_at_ms) AS next_attempt_at_ms
-				 FROM health_queue
-				 WHERE status = 'pending'`,
-			)
-			.get() as { next_attempt_at_ms: number | null };
-		return row.next_attempt_at_ms ?? undefined;
 	}
 
 	close(): void {
@@ -410,5 +507,55 @@ export class GatewayStore {
 			text: row.text,
 			completed_at: row.completed_at,
 		};
+	}
+
+	private updateTaskBindingStatus(taskId: string, status: TaskBindingStatus, updatedAt: string): void {
+		const result = this.database
+			.prepare(
+				`UPDATE instruction_task_bindings
+				 SET compile_status = ?, updated_at = ?
+				 WHERE task_id = ?`,
+			)
+			.run(status, updatedAt, taskId);
+		if (result.changes !== 1) {
+			throw new Error(`Unknown task_id ${taskId}`);
+		}
+	}
+
+	private readTaskBindingRow(instructionId: string): TaskBindingRow | undefined {
+		return this.database
+			.prepare(
+				`SELECT instruction_id, task_id, task_json, compile_status,
+						last_state, last_snapshot_json, route_json,
+						route_leg_index, created_at, updated_at
+				 FROM instruction_task_bindings
+				 WHERE instruction_id = ?`,
+			)
+			.get(instructionId) as TaskBindingRow | undefined;
+	}
+
+	private toTaskBinding(row: TaskBindingRow): StoredTaskBinding {
+		return {
+			instructionId: row.instruction_id,
+			taskId: row.task_id,
+			task: JSON.parse(row.task_json) as MissionTaskSpec,
+			compileStatus: row.compile_status,
+			lastState: row.last_state ? (row.last_state as TaskState) : undefined,
+			lastSnapshot: row.last_snapshot_json ? (JSON.parse(row.last_snapshot_json) as MissionTaskSnapshot) : undefined,
+			route: row.route_json ? (JSON.parse(row.route_json) as VisitRouteParameters) : undefined,
+			routeLegIndex: row.route_leg_index ?? undefined,
+			createdAt: row.created_at,
+			updatedAt: row.updated_at,
+		};
+	}
+
+	private ensureTaskBindingColumn(name: string, definition: string): void {
+		const columns = this.database.prepare("PRAGMA table_info(instruction_task_bindings)").all() as Array<{
+			name: string;
+		}>;
+		if (columns.some((column) => column.name === name)) {
+			return;
+		}
+		this.database.exec(`ALTER TABLE instruction_task_bindings ADD COLUMN ${name} ${definition}`);
 	}
 }

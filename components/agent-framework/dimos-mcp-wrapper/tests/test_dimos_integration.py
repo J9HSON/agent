@@ -7,10 +7,12 @@ import socket
 import sys
 import time
 import unittest
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 
-HAS_SUPPORTED_DIMOS = importlib.util.find_spec("dimos") is not None and sys.version_info < (3, 13)
+HAS_SUPPORTED_DIMOS = importlib.util.find_spec(
+    "dimos"
+) is not None and sys.version_info < (3, 13)
 
 
 @unittest.skipUnless(HAS_SUPPORTED_DIMOS, "requires DIMOS on Python 3.10-3.12")
@@ -46,34 +48,35 @@ class DimosWrapperIntegrationTests(unittest.TestCase):
         else:
             os.environ["MCP_PORT"] = cls._previous_mcp_port_env
 
-    def test_native_mcp_discovers_supported_pinned_official_and_custom_tools(self) -> None:
+    def test_native_mcp_discovers_supported_pinned_official_and_custom_tools(
+        self,
+    ) -> None:
         result = _mcp_request(self._port, "tools/list")
         names = {tool["name"] for tool in result["result"]["tools"]}
 
         self.assertEqual(
             names,
             {
-                "move_forward",
-                "move_backward",
                 "stop_all",
                 "motion_status",
+                "get_robot_summary",
                 "server_status",
                 "list_modules",
-                "agent_send",
-                "relative_move",
-                "wait",
                 "current_time",
-                "execute_sport_command",
                 "get_battery_soc",
                 "observe",
+                "follow_person",
+                "relative_move",
                 "tag_location",
                 "navigate_with_text",
-                "return_to_start",
-                "return_to_user_and_greet",
-                "begin_exploration",
-                "start_patrol",
-                "look_out_for",
-                "start_stroll",
+                "stop_navigation",
+                "start_task",
+                "pause_task",
+                "resume_task",
+                "cancel_task",
+                "get_task_status",
+                "list_semantic_places",
+                "confirm_semantic_place",
             },
         )
 
@@ -104,7 +107,7 @@ def _mcp_request(port: int, method: str) -> dict[str, object]:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urlopen(request, timeout=1.0) as response:
+    with build_opener(ProxyHandler({})).open(request, timeout=1.0) as response:
         decoded: object = json.loads(response.read().decode("utf-8"))
     if not isinstance(decoded, dict):
         raise RuntimeError("MCP response must be a JSON object")

@@ -3,14 +3,54 @@
 from __future__ import annotations
 
 import json
+from threading import RLock
 
 from dimos.agents.annotation import skill
 from dimos.core.core import rpc
 from dimos.core.module import Module
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.navigation.base import NavigationState
 
 
 class DryRunNavigationSkill(Module):
     """Expose the navigation contract without pretending to navigate in dry-run."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self._state = NavigationState.IDLE
+        self._goal: PoseStamped | None = None
+        self._lock = RLock()
+
+    @rpc
+    def set_goal(self, goal: PoseStamped) -> bool:
+        """Record a replay goal without publishing to hardware."""
+
+        with self._lock:
+            self._goal = goal
+            self._state = NavigationState.FOLLOWING_PATH
+        return True
+
+    @rpc
+    def get_state(self) -> NavigationState:
+        """Return the deterministic replay navigation state."""
+
+        with self._lock:
+            return self._state
+
+    @rpc
+    def is_goal_reached(self) -> bool:
+        """Keep replay missions active until explicitly cancelled."""
+
+        return False
+
+    @rpc
+    def cancel_goal(self) -> bool:
+        """Cancel the replay goal and return to idle without hardware I/O."""
+
+        with self._lock:
+            self._goal = None
+            self._state = NavigationState.IDLE
+        return True
 
     @skill
     def relative_move(
@@ -80,11 +120,18 @@ class DryRunNavigationSkill(Module):
 
         return self._unavailable("return_to_user_and_greet")
 
-    @rpc
+    @skill
     def stop_navigation(self) -> str:
-        """Report that no live navigation stack is active in dry-run."""
+        """Cancel any replay goal without touching hardware."""
 
-        return self._unavailable("stop_navigation")
+        self.cancel_goal()
+        return json.dumps(
+            {
+                "status": "stopped",
+                "mode": "dry-run",
+                "hardware_io": False,
+            }
+        )
 
     @skill
     def begin_exploration(self) -> str:

@@ -6,15 +6,16 @@ build-backend = "setuptools.build_meta"
 name = "dimos-dog-mcp"
 version = "0.1.0"
 description = "Standalone DIMOS MCP server for user-directed quadruped motion"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "dimos[web]==0.0.14b1",
+    "dimos-go2-studio==0.1.0",
     "langchain-core==1.5.0",
 ]
 
 [project.optional-dependencies]
 go2 = [
-    "dimos[cuda,unitree]==0.0.14b1",
+    "dimos[cuda,misc,perception,unitree]==0.0.14b1",
     "onnxruntime==1.26.0",
     "onnxruntime-gpu[cuda,cudnn]==1.26.0",
 ]
@@ -22,6 +23,11 @@ go2 = [
 [project.scripts]
 dimos-dog-mcp = "dimos_dog_mcp.blueprint:main"
 dimos-dog-gui = "dimos_dog_mcp.gui:main"
+dimos-stage2-audit = "dimos_dog_mcp.stage2_audit:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.uv.sources]
+dimos = { path = "../../../dimos", editable = true }
+dimos-go2-studio = { path = "../../../dimos/extensions/go2-studio-agent", editable = true }

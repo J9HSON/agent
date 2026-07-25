@@ -25,16 +25,25 @@ class RecordedStops:
     def end_exploration(self) -> str:
         return self._record("exploration")
 
+    def cancel_active_task(self) -> str:
+        return self._record("mission")
+
     def stop_patrol(self) -> str:
         return self._record("patrol")
 
     def stop_stroll(self) -> str:
         return self._record("stroll")
 
+    def stop_following(self) -> str:
+        return self._record("follow")
+
     def stop_looking_out(self) -> str:
         return self._record("lookout")
 
     def stop_navigation(self) -> str:
+        return self._record("navigation")
+
+    def cancel_goal(self) -> str:
         return self._record("navigation")
 
     def stop_motion(self) -> str:
@@ -108,10 +117,11 @@ class StopAllSkillTests(unittest.TestCase):
 
         recorded = RecordedStops(fail="patrol")
         skill = Go2StopAllSkill()
+        skill._mission_executor = recorded
         skill._exploration = recorded
         skill._patrol = recorded
         skill._stroll = recorded
-        skill._lookout = recorded
+        skill._person_follow = recorded
         skill._navigation = recorded
         skill._motion = recorded
 
@@ -119,7 +129,15 @@ class StopAllSkillTests(unittest.TestCase):
 
         self.assertEqual(
             recorded.calls,
-            ["exploration", "patrol", "stroll", "lookout", "navigation", "motion"],
+            [
+                "mission",
+                "exploration",
+                "patrol",
+                "stroll",
+                "follow",
+                "navigation",
+                "motion",
+            ],
         )
         self.assertEqual(payload["status"], "error")
         self.assertEqual(payload["failed_components"], ["patrol"])

@@ -9,7 +9,7 @@ import math
 from threading import Lock
 from typing import Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
 class McpToolClient(Protocol):
@@ -33,7 +33,7 @@ class _NoRedirectHandler(HTTPRedirectHandler):
         return None
 
 
-_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler())
+_NO_REDIRECT_OPENER = build_opener(ProxyHandler({}), _NoRedirectHandler())
 
 
 class HttpMcpToolClient:
