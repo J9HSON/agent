@@ -352,7 +352,7 @@ echo "Robot   ${ROBOT_IP} / ${robot_health}"
 echo
 echo "前台：http://127.0.0.1:8080/"
 
-if [[ "${gateway_was_running}" == false ]]; then
+if [[ "${gateway_was_running}" == false && "${AGENT_CONSOLE_NO_OPEN:-0}" != "1" ]]; then
 	open "http://127.0.0.1:8080/"
 fi
 show_ready_notification

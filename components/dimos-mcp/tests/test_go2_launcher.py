@@ -14,6 +14,39 @@ from dimos_dog_mcp.runtime_owner import RuntimeOwnershipError
 
 @unittest.skipUnless(os.name == "posix", "requires a POSIX shell")
 class Go2LauncherTests(unittest.TestCase):
+    def test_agent_console_launcher_owns_the_complete_product_startup_order(
+        self,
+    ) -> None:
+        script = (
+            Path(__file__).resolve().parents[3] / "启动 Go2 Agent 控制台.command"
+        )
+        source = script.read_text(encoding="utf-8")
+
+        runtime_start = source.index(
+            '"${console_python}" -m dimos_dog_mcp.blueprint'
+        )
+        viewer_wait = source.index("wait_for_port 9878")
+        wrapper_start = source.index(
+            '"${console_python}" -m dimos_mcp_wrapper.blueprint'
+        )
+        gateway_start = source.index(
+            "node --env-file-if-exists=.env dist/cli.js"
+        )
+
+        self.assertTrue(os.access(script, os.X_OK))
+        self.assertLess(runtime_start, viewer_wait)
+        self.assertLess(viewer_wait, wrapper_start)
+        self.assertLess(wrapper_start, gateway_start)
+        self.assertIn('source "${console_env_file}"', source)
+        self.assertIn("dimos_dog_mcp.blueprint", source)
+        self.assertIn("dimos_mcp_wrapper.blueprint", source)
+        self.assertIn('runtime_tool_count}" != "20"', source)
+        self.assertIn('wrapper_tool_count}" != "20"', source)
+        self.assertIn("read_robot_health", source)
+        self.assertIn("agent-webhook-gateway-siliconflow", source)
+        self.assertIn("best_effort_stop", source)
+        self.assertNotIn("DimOS Native.app", source)
+
     def test_main_refuses_an_occupied_mcp_port_before_building_modules(self) -> None:
         with socket.socket() as listener, tempfile.TemporaryDirectory() as temp_dir:
             listener.bind(("127.0.0.1", 0))
