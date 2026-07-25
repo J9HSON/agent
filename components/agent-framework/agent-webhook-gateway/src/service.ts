@@ -1,3 +1,4 @@
+import { consoleGatewayLogSink, describeGatewayError, type GatewayLogSink, writeGatewayLog } from "./logging.ts";
 import type { GatewayStore } from "./store.ts";
 import {
 	type ExternalInstruction,
@@ -18,6 +19,7 @@ export interface AgentWebhookServiceOptions {
 	retryBaseMs?: number;
 	retryMaxMs?: number;
 	onBackgroundError?: (error: unknown) => void;
+	onLog?: GatewayLogSink;
 }
 
 export class AgentWebhookService {
@@ -28,6 +30,7 @@ export class AgentWebhookService {
 	private readonly retryBaseMs: number;
 	private readonly retryMaxMs: number;
 	private readonly onBackgroundError: (error: unknown) => void;
+	private readonly onLog: GatewayLogSink;
 	private agentDrainPromise?: Promise<void>;
 	private stopDrainPromise?: Promise<void>;
 	private deliveryPromise?: Promise<void>;
@@ -41,7 +44,12 @@ export class AgentWebhookService {
 		this.replyClient = options.replyClient;
 		this.retryBaseMs = options.retryBaseMs ?? 1_000;
 		this.retryMaxMs = options.retryMaxMs ?? 60_000;
-		this.onBackgroundError = options.onBackgroundError ?? ((error) => console.error(error));
+		this.onLog = options.onLog ?? consoleGatewayLogSink;
+		this.onBackgroundError =
+			options.onBackgroundError ??
+			((error) => {
+				this.log("background.failed", { error: describeGatewayError(error) });
+			});
 	}
 
 	start(): void {
@@ -59,7 +67,20 @@ export class AgentWebhookService {
 				`instruction_id ${instruction.instructionId} is already associated with different text`,
 			);
 		}
+		if (result === "duplicate") {
+			this.log("instruction.duplicate", {
+				instruction_id: instruction.instructionId,
+				kind: stopPhrase ? "stop" : "agent",
+				text: instruction.text,
+			});
+			return;
+		}
 		if (result === "accepted") {
+			this.log("instruction.accepted", {
+				instruction_id: instruction.instructionId,
+				kind: stopPhrase ? "stop" : "agent",
+				text: instruction.text,
+			});
 			if (stopPhrase) {
 				this.scheduleStopDrain();
 			} else {
@@ -79,17 +100,24 @@ export class AgentWebhookService {
 					if (!instruction) {
 						return;
 					}
+					this.log("instruction.processing", {
+						instruction_id: instruction.instructionId,
+						kind: "agent",
+					});
 					let replyText = FAILURE_REPLY_TEXT;
 					try {
 						const result = await this.agent.run(instruction.text);
 						if (result.trim()) {
 							replyText = result;
 						}
-					} catch {
+					} catch (error) {
 						replyText = FAILURE_REPLY_TEXT;
+						this.log("instruction.agent_failed", {
+							instruction_id: instruction.instructionId,
+							error: describeGatewayError(error),
+						});
 					}
-					this.store.completeInstruction(instruction.instructionId, replyText, new Date().toISOString());
-					this.scheduleDelivery();
+					this.completeInstruction(instruction.instructionId, replyText);
 				}
 			})
 			.catch(this.onBackgroundError)
@@ -112,14 +140,21 @@ export class AgentWebhookService {
 					if (!instruction) {
 						return;
 					}
+					this.log("instruction.processing", {
+						instruction_id: instruction.instructionId,
+						kind: "stop",
+					});
 					let replyText = STOP_ACCEPTED_REPLY_TEXT;
 					try {
 						await this.mcp.callTool("stop_all", {});
-					} catch {
+					} catch (error) {
 						replyText = FAILURE_REPLY_TEXT;
+						this.log("instruction.stop_failed", {
+							instruction_id: instruction.instructionId,
+							error: describeGatewayError(error),
+						});
 					}
-					this.store.completeInstruction(instruction.instructionId, replyText, new Date().toISOString());
-					this.scheduleDelivery();
+					this.completeInstruction(instruction.instructionId, replyText);
 				}
 			})
 			.catch(this.onBackgroundError)
@@ -146,13 +181,30 @@ export class AgentWebhookService {
 					if (!pending) {
 						return;
 					}
+					this.log("reply.delivery_started", {
+						instruction_id: pending.event.instruction_id,
+						reply_id: pending.event.reply_id,
+						attempt: pending.attempts + 1,
+					});
 					try {
 						await this.replyClient.deliver(pending.event);
 						this.store.markReplyDelivered(pending.event.reply_id, new Date().toISOString());
-					} catch {
+						this.log("reply.delivered", {
+							instruction_id: pending.event.instruction_id,
+							reply_id: pending.event.reply_id,
+							attempt: pending.attempts + 1,
+						});
+					} catch (error) {
 						const retryDelay = Math.min(this.retryBaseMs * 2 ** pending.attempts, this.retryMaxMs);
 						const retryAt = Date.now() + retryDelay;
 						this.store.markReplyFailed(pending.event.reply_id, retryAt);
+						this.log("reply.delivery_failed", {
+							instruction_id: pending.event.instruction_id,
+							reply_id: pending.event.reply_id,
+							attempt: pending.attempts + 1,
+							retry_in_ms: retryDelay,
+							error: describeGatewayError(error),
+						});
 						return;
 					}
 				}
@@ -193,6 +245,20 @@ export class AgentWebhookService {
 		await Promise.all([this.agentDrainPromise, this.stopDrainPromise, this.deliveryPromise]);
 		await this.agent.close?.();
 		this.store.close();
+	}
+
+	private log(event: string, details: Readonly<Record<string, unknown>>): void {
+		writeGatewayLog(this.onLog, event, details);
+	}
+
+	private completeInstruction(instructionId: string, replyText: string): void {
+		const reply = this.store.completeInstruction(instructionId, replyText, new Date().toISOString());
+		this.log("instruction.completed", {
+			instruction_id: instructionId,
+			reply_id: reply.reply_id,
+			text: replyText,
+		});
+		this.scheduleDelivery();
 	}
 }
 

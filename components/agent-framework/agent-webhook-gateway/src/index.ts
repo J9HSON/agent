@@ -5,6 +5,7 @@ export * from "./health-mcp-client.ts";
 export * from "./health-service.ts";
 export * from "./health-webhook.ts";
 export * from "./http-server.ts";
+export * from "./logging.ts";
 export * from "./mcp-client.ts";
 export * from "./reply-client.ts";
 export * from "./service.ts";

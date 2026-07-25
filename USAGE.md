@@ -289,6 +289,8 @@ POST http://网关主机:8080/v1/instructions
 | `AGENT_WEBHOOK_SESSION_DIR` | `<cwd>/data/agent-session` | 固定 Agent 会话目录。 |
 | `AGENT_WEBHOOK_DEFAULT_SPEED_MPS` | `0.1` | 仅距离请求的部署标定速度。 |
 
+网关标准输出会以 `[agent-webhook] <ISO 时间> <事件名> <JSON 字段>` 的单行格式记录普通 instruction/reply 生命周期，包括请求被接受或拒绝、幂等重投、Agent/停止处理、最终回复生成、回调投递以及失败重试。成功日志包含完整的用户文本和最终回复；失败日志只包含简短错误消息，不打印异常堆栈，畸形请求也不会回显原始 body。终端日志因此属于敏感运行数据，只应保留在受控环境。
+
 其余超时和回复重投配置见 `components/agent-framework/agent-webhook-gateway/README.md`。HTTP 请求与回复 schema、停止口令规范化规则及下层开发者验收清单见 [Webhook 对接指南](docs/agent-input-webhook-integration.md)。
 
 ### 智能项圈 Health MCP v0.2（可选）

@@ -69,6 +69,20 @@ POST http://127.0.0.1:8080/v1/instructions
 
 普通 instruction/reply MVP 没有身份校验、签名或重放防护，只能部署在受信任网络。可选 Health endpoint 使用 raw-body HMAC、`±300` 秒时间戳和当前/前一 key rotation，但非 loopback 部署仍需 TLS 和网络访问控制。
 
+### 终端日志
+
+网关在标准输出中使用单行结构化日志记录普通 instruction/reply 生命周期：
+
+```text
+[agent-webhook] 2026-07-25T11:00:00.000Z instruction.accepted {"instruction_id":"demo-1","kind":"agent","text":"你好"}
+[agent-webhook] 2026-07-25T11:00:00.001Z instruction.processing {"instruction_id":"demo-1","kind":"agent"}
+[agent-webhook] 2026-07-25T11:00:01.000Z instruction.completed {"instruction_id":"demo-1","reply_id":"...","text":"你好，请问需要我做什么？"}
+[agent-webhook] 2026-07-25T11:00:01.001Z reply.delivery_started {"instruction_id":"demo-1","reply_id":"...","attempt":1}
+[agent-webhook] 2026-07-25T11:00:01.020Z reply.delivered {"instruction_id":"demo-1","reply_id":"...","attempt":1}
+```
+
+非法请求记录 `request.rejected`，幂等重投记录 `instruction.duplicate`，模型、停止调用或回复回调失败分别记录 `instruction.agent_failed`、`instruction.stop_failed`、`reply.delivery_failed`。失败日志只包含简短错误消息，不输出异常堆栈；畸形请求不会回显原始 body。普通成功日志会包含完整用户文本与最终回复，因此终端输出本身属于敏感运行数据，不应公开转发或写入不受控日志系统。
+
 ## 行为
 
 - 输入 JSON 只能包含非空的 `instruction_id` 和 `text`。

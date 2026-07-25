@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { HealthWebhookReceiver } from "./health-webhook.ts";
+import { consoleGatewayLogSink, type GatewayLogSink, writeGatewayLog } from "./logging.ts";
 import { type AgentWebhookService, InstructionConflictError } from "./service.ts";
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -42,18 +43,42 @@ function parseInstruction(value: unknown): { instructionId: string; text: string
 	return { instructionId: record.instruction_id, text: record.text };
 }
 
-export function createInstructionServer(service: AgentWebhookService, healthReceiver?: HealthWebhookReceiver): Server {
+function requestPath(request: IncomingMessage): string | null {
+	if (!request.url) {
+		return null;
+	}
+	try {
+		return new URL(request.url, "http://gateway.invalid").pathname;
+	} catch {
+		return request.url.split(/[?#]/u, 1)[0] || null;
+	}
+}
+
+export function createInstructionServer(
+	service: AgentWebhookService,
+	healthReceiver?: HealthWebhookReceiver,
+	onLog: GatewayLogSink = consoleGatewayLogSink,
+): Server {
 	return createServer(async (request, response) => {
+		const rejectRequest = (status: number, error: string, reason: string): void => {
+			writeGatewayLog(onLog, "request.rejected", {
+				method: request.method ?? null,
+				path: requestPath(request),
+				status,
+				reason,
+			});
+			sendJson(response, status, { error });
+		};
 		if (request.url === "/v1/health-events" && healthReceiver) {
 			await healthReceiver.handle(request, response);
 			return;
 		}
 		if (request.method !== "POST" || request.url !== "/v1/instructions") {
-			sendJson(response, 404, { error: "not_found" });
+			rejectRequest(404, "not_found", "not_found");
 			return;
 		}
 		if (!request.headers["content-type"]?.toLowerCase().startsWith("application/json")) {
-			sendJson(response, 400, { error: "invalid_request" });
+			rejectRequest(400, "invalid_request", "invalid_content_type");
 			return;
 		}
 
@@ -66,21 +91,21 @@ export function createInstructionServer(service: AgentWebhookService, healthRece
 			});
 		} catch (error) {
 			if (error instanceof InstructionConflictError) {
-				sendJson(response, 409, { error: "instruction_id_conflict" });
+				rejectRequest(409, "instruction_id_conflict", "instruction_id_conflict");
 				return;
 			}
 			if (error instanceof SyntaxError || (error instanceof Error && error.message.startsWith("Request body"))) {
-				sendJson(response, 400, { error: "invalid_request" });
+				rejectRequest(400, "invalid_request", error instanceof SyntaxError ? "invalid_json" : "invalid_schema");
 				return;
 			}
 			if (
 				error instanceof Error &&
 				(error.message.startsWith("instruction_id") || error.message.startsWith("text must"))
 			) {
-				sendJson(response, 400, { error: "invalid_request" });
+				rejectRequest(400, "invalid_request", "invalid_schema");
 				return;
 			}
-			sendJson(response, 503, { error: "persistence_unavailable" });
+			rejectRequest(503, "persistence_unavailable", "persistence_unavailable");
 		}
 	});
 }
