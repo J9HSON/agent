@@ -1,4 +1,10 @@
-import { consoleGatewayLogSink, describeGatewayError, type GatewayLogSink, writeGatewayLog } from "./logging.ts";
+import {
+	consoleGatewayLogSink,
+	describeGatewayError,
+	describeGatewayLogText,
+	type GatewayLogSink,
+	writeGatewayLog,
+} from "./logging.ts";
 import type { GatewayStore } from "./store.ts";
 import type { ExternalInstruction, McpToolCaller, UserTextAgent } from "./types.ts";
 
@@ -86,7 +92,16 @@ export class AgentWebhookService {
 						kind: "agent",
 					});
 					try {
-						await this.agent.run(instruction.text);
+						const output = await this.agent.run(instruction.text, ({ event, ...details }) => {
+							this.log(event, {
+								instruction_id: instruction.instructionId,
+								...details,
+							});
+						});
+						this.log("instruction.agent_completed", {
+							instruction_id: instruction.instructionId,
+							output: describeGatewayLogText(output),
+						});
 					} catch (error) {
 						this.log("instruction.agent_failed", {
 							instruction_id: instruction.instructionId,

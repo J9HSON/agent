@@ -56,7 +56,7 @@ $env:AGENT_WEBHOOK_HEALTH_MCP_URL = "http://项圈上位机IP:8765/mcp"
 | 环境变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `AGENT_WEBHOOK_HEALTH_WEARER_ID` | 启用时 | 无 | 单实例允许的 wearer ID，必须符合 v0.2 `WearerId`。 |
-| `AGENT_WEBHOOK_HEALTH_MCP_URL` | 启用时 | 无 | 项圈上位机暴露的 MCP 2025-11-25 Streamable HTTP URL。 |
+| `AGENT_WEBHOOK_HEALTH_MCP_URL` | 启用时 | 无 | 项圈上位机暴露的、不含用户名或密码的 MCP 2025-11-25 Streamable HTTP URL。 |
 | `AGENT_WEBHOOK_HEALTH_MCP_TIMEOUT_MS` | 否 | `10000` | initialize 和 tools/call 的单次超时。 |
 | `AGENT_WEBHOOK_HEALTH_RETRY_BASE_MS` | 否 | `1000` | MCP transport 或可重试领域失败后的队列重试基数。 |
 | `AGENT_WEBHOOK_HEALTH_RETRY_MAX_MS` | 否 | `60000` | 本地指数退避上限；上游合法 `retry_after_ms` 可以延长等待。 |
@@ -111,7 +111,7 @@ initialize(protocolVersion=2025-11-25)
 notifications/initialized
 ```
 
-每条 JSON-RPC 消息使用一个 HTTP POST。Gateway 接受 `application/json` 和 `text/event-stream` 响应，保存初始化响应中的可选 `MCP-Session-Id`，并在后续请求携带该 session 与 `MCP-Protocol-Version: 2025-11-25`。session 返回 `404` 时会失效并在队列下次重试时重新 initialize。
+每条 JSON-RPC 消息使用一个 HTTP POST。Gateway 接受 `application/json` 和 `text/event-stream` 响应，保存初始化响应中的可选 `MCP-Session-Id`，并在后续请求携带该 session 与 `MCP-Protocol-Version: 2025-11-25`。session 返回 `404` 时会立即失效、重新 initialize，并只重试一次当前只读工具调用；并发旧请求的迟到 `404` 不会清除已经替换的新 session。
 
 每条首次受理的 notification 依次调用：
 
@@ -129,7 +129,7 @@ health.get_current_state(wearer_id, max_age_ms=2000)
 
 HTTP transport、session 失效、timeout，或带 `retryable=true` 的领域失败会把 health queue item 恢复为 pending，并取本地指数退避与 `retry_after_ms` 的较大值。不可重试的领域失败、JSON-RPC/结果契约不匹配、非 live/test 数据、事件不匹配或非 fresh state 会记录审计并停止本次处理，不使用旧状态替代。
 
-项圈上位机的当前 `smart-neckband-health-integration` 检出版本只提供 stdio server；在真实跨机部署前，上游必须先启用其规划中的 `http://<health-host>:8765/mcp` Streamable HTTP transport。仅在地瓜派增加 URL 无法把 stdio 进程自动变成网络服务。
+项圈上位机必须实际监听所配置的 `http://<health-host>:8765/mcp` Streamable HTTP endpoint；Gateway 只作为客户端连接该 URL，不会把 stdio 进程转换成网络服务或在地瓜派启动上游进程。
 
 `verified_no_action` 表示：
 
@@ -150,4 +150,4 @@ node node_modules/vitest/dist/cli.js --run test/health-mcp-client.test.ts
 npm run check
 ```
 
-自动化测试覆盖无鉴权请求、旧鉴权 Header 忽略行为、验证顺序、错误映射、并发幂等、raw-body 冲突、MCP initialize、远程 Streamable HTTP session/headers/SSE、无 `Authorization`，以及 TextContent/structuredContent 一致性。现有跨仓库 fixture 仍通过 stdio 验证上游业务工具契约，但生产 CLI 不使用该路径。测试只使用临时端口和临时 SQLite。
+自动化测试覆盖无鉴权请求、旧鉴权 Header 忽略行为、验证顺序、错误映射、并发幂等、raw-body 冲突、MCP initialize、本地 fake Streamable HTTP MCP 的 JSON/SSE、session 过期与并发迟到 `404`、HTTP/JSON-RPC 错误、DELETE 关闭、无 `Authorization`，以及 TextContent/structuredContent 一致性。现有跨仓库 fixture 仍通过 stdio 验证上游业务工具契约，但生产 CLI 不使用该路径。测试只使用临时端口和临时 SQLite。

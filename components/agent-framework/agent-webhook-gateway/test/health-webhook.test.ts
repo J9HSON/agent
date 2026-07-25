@@ -5,12 +5,18 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	AgentWebhookService,
+	createHealthGatewayIntegration,
 	createInstructionServer,
 	GatewayStore,
 	type HealthMcpToolCaller,
 	HealthNotificationService,
 	HealthWebhookReceiver,
+	readGatewayConfig,
 } from "../src/index.ts";
+import {
+	type FakeHealthStreamableHttpMcp,
+	startFakeHealthStreamableHttpMcp,
+} from "./support/fake-health-streamable-http-mcp.ts";
 
 const WEBHOOK_BODY =
 	'{"schema_version":"0.2.0","notification_id":"894d7ebf-3c7a-4818-a85d-3555a0d4dd13","notification_sequence":431,"event_id":"50d40557-8df6-47b5-abce-1ef447bf5543","event_revision":2,"transition":"resolved","event_type":"lead_off","wearer_id":"xwen","source_instance_id":"ef132c67-a98f-474a-a673-4ab6ea784790","state_revision":1849,"data_source":"live","occurred_at":"2026-07-23T02:10:03.000Z","sent_at":"2026-07-23T02:10:03.120Z","trace_id":"7a916c4a-3b3e-4ec5-8491-e5fc7e843863","test_mode":false}';
@@ -19,6 +25,7 @@ const servers: Server[] = [];
 const directories: string[] = [];
 const healthServices: HealthNotificationService[] = [];
 const instructionServices: AgentWebhookService[] = [];
+const fakeHealthMcpServers: FakeHealthStreamableHttpMcp[] = [];
 
 afterEach(async () => {
 	await Promise.all(healthServices.splice(0).map((service) => service.close()));
@@ -31,6 +38,7 @@ afterEach(async () => {
 				}),
 		),
 	);
+	await Promise.all(fakeHealthMcpServers.splice(0).map((server) => server.close()));
 	for (const directory of directories.splice(0)) {
 		rmSync(directory, { recursive: true, force: true });
 	}
@@ -60,6 +68,110 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 describe("smart-collar health webhook", () => {
+	it("starts the configured remote Health MCP path and deletes its session on gateway shutdown", async () => {
+		const fakeHealthMcp = await startFakeHealthStreamableHttpMcp({
+			callTool: (name) => {
+				if (name === "health.get_event_details") {
+					return {
+						structuredContent: {
+							ok: true,
+							data: {
+								event: {
+									schema_version: "0.2.0",
+									event_id: "50d40557-8df6-47b5-abce-1ef447bf5543",
+									event_revision: 2,
+									event_type: "lead_off",
+									wearer_id: "xwen",
+									source_instance_id: "ef132c67-a98f-474a-a673-4ab6ea784790",
+									data_source: "live",
+									status: "resolved",
+									test_mode: false,
+								},
+							},
+							meta: {},
+							error: null,
+						},
+					};
+				}
+				if (name === "health.get_current_state") {
+					return {
+						structuredContent: {
+							ok: true,
+							data: {
+								state: {
+									schema_version: "0.2.0",
+									wearer_id: "xwen",
+									state_revision: 1850,
+									source_instance_id: "ef132c67-a98f-474a-a673-4ab6ea784790",
+									data_source: "live",
+									freshness: "fresh",
+									test_mode: false,
+								},
+							},
+							meta: {},
+							error: null,
+						},
+					};
+				}
+				throw new Error(`Unexpected Health MCP tool ${name}`);
+			},
+		});
+		fakeHealthMcpServers.push(fakeHealthMcp);
+		const directory = mkdtempSync(join(tmpdir(), "health-gateway-runtime-"));
+		directories.push(directory);
+		const store = new GatewayStore(join(directory, "gateway.sqlite"));
+		const config = readGatewayConfig(
+			{
+				AGENT_WEBHOOK_HEALTH_WEARER_ID: "xwen",
+				AGENT_WEBHOOK_HEALTH_MCP_URL: fakeHealthMcp.url,
+			},
+			directory,
+			directory,
+		);
+		if (!config.health) {
+			throw new Error("Expected Health configuration to be enabled");
+		}
+		const healthIntegration = createHealthGatewayIntegration(config.health, store);
+		healthServices.push(healthIntegration.service);
+		healthIntegration.service.start();
+		const instructionService = new AgentWebhookService({
+			store,
+			agent: { run: async () => "unused" },
+			mcp: { callTool: async () => "unused" },
+		});
+		instructionServices.push(instructionService);
+		instructionService.start();
+		const gatewayUrl = await listen(createInstructionServer(instructionService, healthIntegration.receiver));
+
+		const accepted = await fetch(`${gatewayUrl}/v1/health-events`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"x-smart-collar-notification-id": "894d7ebf-3c7a-4818-a85d-3555a0d4dd13",
+			},
+			body: WEBHOOK_BODY,
+		});
+
+		expect(accepted.status).toBe(202);
+		await waitFor(() => fakeHealthMcp.requests.filter(({ body }) => body?.method === "tools/call").length === 2);
+		expect(
+			fakeHealthMcp.requests.filter(({ body }) => body?.method === "tools/call").map(({ body }) => body?.params),
+		).toEqual([
+			{
+				name: "health.get_event_details",
+				arguments: { event_id: "50d40557-8df6-47b5-abce-1ef447bf5543" },
+			},
+			{
+				name: "health.get_current_state",
+				arguments: { wearer_id: "xwen", max_age_ms: 2000 },
+			},
+		]);
+
+		await healthIntegration.service.close();
+		expect(fakeHealthMcp.requests.at(-1)?.httpMethod).toBe("DELETE");
+		expect(fakeHealthMcp.requests.at(-1)?.headers["mcp-session-id"]).toBe("health-session-1");
+	});
+
 	it("persists and ACKs before independently verifying authoritative MCP state without physical action", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "health-webhook-"));
 		directories.push(directory);

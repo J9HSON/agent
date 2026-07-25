@@ -86,6 +86,16 @@ describe("gateway configuration", () => {
 				"C:/Users/operator",
 			),
 		).toThrow("AGENT_WEBHOOK_HEALTH_MCP_URL must be an absolute HTTP(S) URL");
+		expect(() =>
+			readGatewayConfig(
+				{
+					AGENT_WEBHOOK_HEALTH_WEARER_ID: "xwen",
+					AGENT_WEBHOOK_HEALTH_MCP_URL: "http://operator:secret@health-host:8765/mcp",
+				},
+				"C:/gateway",
+				"C:/Users/operator",
+			),
+		).toThrow("AGENT_WEBHOOK_HEALTH_MCP_URL must not contain credentials");
 	});
 
 	it("ignores removed health authentication variables", () => {

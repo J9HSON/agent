@@ -85,10 +85,15 @@ function readHealthConfig(environment: Environment): HealthGatewayConfig | undef
 	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(wearerId)) {
 		throw new Error("AGENT_WEBHOOK_HEALTH_WEARER_ID does not match the Health MCP wearer_id contract");
 	}
+	const mcpUrl = readHttpUrl(environment, "AGENT_WEBHOOK_HEALTH_MCP_URL");
+	const parsedMcpUrl = new URL(mcpUrl);
+	if (parsedMcpUrl.username || parsedMcpUrl.password) {
+		throw new Error("AGENT_WEBHOOK_HEALTH_MCP_URL must not contain credentials");
+	}
 
 	return {
 		wearerId,
-		mcpUrl: readHttpUrl(environment, "AGENT_WEBHOOK_HEALTH_MCP_URL"),
+		mcpUrl,
 		mcpTimeoutMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_MCP_TIMEOUT_MS", 10_000),
 		retryBaseMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_RETRY_BASE_MS", 1_000),
 		retryMaxMs: readPositiveNumber(environment, "AGENT_WEBHOOK_HEALTH_RETRY_MAX_MS", 60_000),

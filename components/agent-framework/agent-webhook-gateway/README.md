@@ -23,13 +23,13 @@ Windows PowerShell：
 
 ```powershell
 Set-Location "C:/absolute/path/to/pi-hackason/components/agent-framework/agent-webhook-gateway"
-npm ci --ignore-scripts
+npm ci --include=dev --ignore-scripts
 npm run build
 ```
 
 服务默认读取 `~/.pi/agent` 中既有的 Pi Coding Agent 模型与认证配置。部署前应先用 Pi 完成模型和认证配置。
 
-### Ubuntu 24.04 arm64（地瓜派）
+### Ubuntu 22.04/24.04 arm64（地瓜派）
 
 使用 Node.js 22.19.0 或更高版本的官方 Linux ARM64 构建。systemd 单元只在 `/usr/local/bin`、`/usr/bin` 和 `/bin` 查找 Node；`command -v node` 必须返回其中之一。不要把 x64 Node、Windows `node_modules` 或本机已有 `dist` 复制到板上：
 
@@ -40,13 +40,12 @@ node -p '`${process.platform}/${process.arch}`'
 command -v node
 
 cd "$HOME/pi-hackason/components/agent-framework/agent-webhook-gateway"
-npm ci --ignore-scripts
+npm ci --include=dev --ignore-scripts
 npm run build
 cp .env.example .env
-npm run preflight:ubuntu-arm64
 ```
 
-预检会检查 Ubuntu 24.04、arm64、Node 版本、原生 SQLite、构建产物、生产依赖、Pi 配置目录和持久化目录权限。如果配置了 TTS MCP 或 Health MCP URL，还会验证它是绝对 HTTP(S) URL；预检不会连接模型、DIMOS、TTS、Health MCP 或机器狗。
+构建必须保留开发依赖，以确保使用锁定的 TypeScript 5.9.3 及其完整标准库；不要依赖 Ubuntu 全局安装的 `tsc`。如果出现 `Cannot find global type`，重新执行 `npm ci --include=dev --ignore-scripts` 后再构建。
 
 仓库提供 user-level systemd 单元，默认仓库位于 `$HOME/pi-hackason`：
 
@@ -71,7 +70,7 @@ npm run build
 npm run start
 ```
 
-远程机器狗联调时，将 `AGENT_WEBHOOK_MCP_URL` 指向 `dimos-mcp-wrapper` 的 `:9991/mcp`，不要直接连接 `dimos-dog-mcp`。硬件需要 TTS 时，将 `AGENT_WEBHOOK_TTS_MCP_URL` 指向另一个实现 `speak(text)` 的端点；两个 URL 不得相同。机器人和 TTS 传输使用项目既有的无状态 HTTP JSON-RPC `tools/call` profile，不执行标准 MCP session 协商。Health 则通过 `AGENT_WEBHOOK_HEALTH_MCP_URL` 连接项圈上位机的标准 MCP 2025-11-25 Streamable HTTP endpoint，完成 initialize 和可选 session 协商。`npm run start:dev` 使用同一 `.env` 直接运行 TypeScript 入口。
+远程机器狗联调时，将 `AGENT_WEBHOOK_MCP_URL` 指向 `dimos-mcp-wrapper` 的 `:9991/mcp`，不要直接连接 `dimos-dog-mcp`。硬件需要 TTS 时，将 `AGENT_WEBHOOK_TTS_MCP_URL` 指向另一个实现 `speak(text)` 的端点；两个 URL 不得相同。机器人和 TTS 传输使用项目既有的无状态 HTTP JSON-RPC `tools/call` profile，不执行标准 MCP session 协商。Health 则通过 `AGENT_WEBHOOK_HEALTH_MCP_URL` 连接项圈上位机的标准 MCP 2025-11-25 Streamable HTTP endpoint，完成 initialize 和可选 session 协商；session 失效时会重新 initialize，并只重试一次当前只读调用。`npm run start:dev` 使用同一 `.env` 直接运行 TypeScript 入口。
 
 默认输入端点：
 
@@ -93,7 +92,7 @@ POST http://127.0.0.1:8080/v1/instructions
 | `AGENT_WEBHOOK_SESSION_DIR` | `<cwd>/data/agent-session` | 固定 Agent 会话的持久化目录。 |
 | `AGENT_WEBHOOK_DEFAULT_SPEED_MPS` | `0.1` | 用户只给距离时用于估算时长的部署标定速度。 |
 | `AGENT_WEBHOOK_HEALTH_WEARER_ID` | 无 | 设置后启用 Health；单实例 wearer ID。 |
-| `AGENT_WEBHOOK_HEALTH_MCP_URL` | 无 | 启用 Health 时必填；项圈上位机的 Streamable HTTP MCP URL，例如 `http://192.168.66.224:8765/mcp`。 |
+| `AGENT_WEBHOOK_HEALTH_MCP_URL` | 无 | 启用 Health 时必填；不含用户名或密码的项圈上位机 Streamable HTTP MCP URL，例如 `http://192.168.66.224:8765/mcp`。 |
 | `AGENT_WEBHOOK_HEALTH_MCP_TIMEOUT_MS` | `10000` | Health MCP initialize/tools call 超时。 |
 | `AGENT_WEBHOOK_HEALTH_RETRY_BASE_MS` | `1000` | Health transport 或可重试领域失败后的队列重试基数。 |
 | `AGENT_WEBHOOK_HEALTH_RETRY_MAX_MS` | `60000` | Health 本地指数退避上限。 |
@@ -107,10 +106,18 @@ POST http://127.0.0.1:8080/v1/instructions
 ```text
 [agent-webhook] 2026-07-25T11:00:00.000Z instruction.accepted {"instruction_id":"demo-1","kind":"agent","text":"你好"}
 [agent-webhook] 2026-07-25T11:00:00.001Z instruction.processing {"instruction_id":"demo-1","kind":"agent"}
+[agent-webhook] 2026-07-25T11:00:00.002Z agent.run_started {"instruction_id":"demo-1"}
+[agent-webhook] 2026-07-25T11:00:00.003Z agent.turn_started {"instruction_id":"demo-1"}
+[agent-webhook] 2026-07-25T11:00:00.100Z agent.tool_started {"instruction_id":"demo-1","tool_call_id":"call-1","tool_name":"server_status","arguments":"{}"}
+[agent-webhook] 2026-07-25T11:00:00.200Z agent.tool_completed {"instruction_id":"demo-1","tool_call_id":"call-1","tool_name":"server_status","is_error":false,"output":"ready"}
+[agent-webhook] 2026-07-25T11:00:00.900Z agent.response_completed {"instruction_id":"demo-1","output":"当前服务已就绪。"}
+[agent-webhook] 2026-07-25T11:00:00.901Z agent.turn_completed {"instruction_id":"demo-1","tool_result_count":1,"stop_reason":"stop"}
+[agent-webhook] 2026-07-25T11:00:00.902Z agent.run_completed {"instruction_id":"demo-1","will_retry":false}
+[agent-webhook] 2026-07-25T11:00:00.903Z instruction.agent_completed {"instruction_id":"demo-1","output":"当前服务已就绪。"}
 [agent-webhook] 2026-07-25T11:00:01.000Z instruction.completed {"instruction_id":"demo-1"}
 ```
 
-非法请求记录 `request.rejected`，幂等重投记录 `instruction.duplicate`，模型或停止调用失败分别记录 `instruction.agent_failed`、`instruction.stop_failed`。没有任何 `reply.*` 日志。成功日志包含完整用户文本，因此终端输出属于敏感运行数据。
+Agent 日志覆盖运行、多轮、assistant 响应、工具调用、自动重试和上下文压缩的开始/完成边界；工具参数、工具文本结果和最终内部 assistant 文本均可见。逐 token 更新和模型私有推理不会写入日志。非法请求记录 `request.rejected`，幂等重投记录 `instruction.duplicate`，模型或停止调用失败分别记录 `instruction.agent_failed`、`instruction.stop_failed`。没有任何 `reply.*` 日志，`instruction.agent_completed.output` 仍只是内部回合结果，不是出站回复。文本字段会做常见凭据脱敏并限制为 2000 字符，但成功日志仍包含用户和模型内容，因此终端输出属于敏感运行数据。
 
 ## 行为
 

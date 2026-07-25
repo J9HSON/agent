@@ -206,13 +206,21 @@ $env:AGENT_WEBHOOK_TTS_MCP_URL = "http://tts-device:9992/mcp"
 npm.cmd run start:dev
 ```
 
-## 7. 迁移说明
+## 7. 运行日志
+
+网关标准输出使用 `[agent-webhook] <ISO 时间> <事件名> <JSON 字段>` 单行格式。普通输入从 `instruction.accepted`、`instruction.processing` 开始；Agent 随后记录 `agent.run_started`、每轮开始与完成、assistant 响应开始与完成、每次工具调用开始与完成、自动重试、上下文压缩，以及 `agent.run_completed`。`instruction.agent_completed.output` 给出最终内部 assistant 文本，最后才记录 `instruction.completed`。
+
+所有 `agent.*` 和最终输出日志都携带 `instruction_id`。工具事件还包含 `tool_call_id`、工具名、参数、错误标记和文本结果，可用于区分“模型只生成文本”“模型调用了 `speak`”“模型调用了机器狗工具”。逐 token 更新和模型私有推理不会记录。`instruction.agent_completed.output` 不是出站回复，也不证明 TTS 或机器狗产生了物理效果。
+
+用户、模型和工具文本属于敏感运行数据。常见凭据模式会脱敏，单个文本字段最多记录 2000 字符；部署方仍应限制日志访问和留存。
+
+## 8. 迁移说明
 
 升级前应删除部署环境中的全部旧回复 Webhook URL、超时和重试配置。代码不再读取这些配置，也不再创建、查询或投递回复 outbox。
 
 为避免未经授权地破坏既有数据，升级不会主动删除旧 SQLite 文件中的历史 `outbox` 表。该表处于惰性遗留状态，新运行时不会读取或写入它。若部署方需要回收空间，应先备份并在独立维护窗口执行数据库迁移。
 
-## 8. 联调验收
+## 9. 联调验收
 
 输入端：
 
@@ -220,6 +228,7 @@ npm.cmd run start:dev
 - [ ] 相同 ID、相同文本仍返回 `202 accepted`，Agent 只运行一次，日志包含 `instruction.duplicate`。
 - [ ] 相同 ID、不同文本返回 `409`。
 - [ ] `202` 后不等待任何回复回调。
+- [ ] 普通输入日志包含同一 `instruction_id` 的 `agent.run_started`、工具/响应边界、`instruction.agent_completed` 和 `instruction.completed`。
 
 TTS MCP：
 

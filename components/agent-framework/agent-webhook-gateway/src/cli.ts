@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 import { PiUserTextAgent } from "./agent-runtime.ts";
 import { readGatewayConfig } from "./config.ts";
-import { HealthMcpClient, StreamableHttpHealthMcpTransport } from "./health-mcp-client.ts";
-import { HealthNotificationService } from "./health-service.ts";
-import { HealthWebhookReceiver } from "./health-webhook.ts";
+import { startGatewayListener } from "./gateway-lifecycle.ts";
+import { createHealthGatewayIntegration } from "./health-gateway.ts";
 import { createInstructionServer } from "./http-server.ts";
 import { HttpMcpToolClient } from "./mcp-client.ts";
 import { AgentWebhookService } from "./service.ts";
@@ -27,60 +26,38 @@ async function main(): Promise<void> {
 		agent,
 		mcp,
 	});
-	let healthService: HealthNotificationService | undefined;
-	let healthReceiver: HealthWebhookReceiver | undefined;
-	if (config.health) {
-		const healthMcp = new HealthMcpClient(
-			new StreamableHttpHealthMcpTransport(config.health.mcpUrl, config.health.mcpTimeoutMs),
-		);
-		healthService = new HealthNotificationService({
-			store,
-			mcp: healthMcp,
-			wearerId: config.health.wearerId,
-			retryBaseMs: config.health.retryBaseMs,
-			retryMaxMs: config.health.retryMaxMs,
-		});
-		healthReceiver = new HealthWebhookReceiver({
-			store,
-			healthService,
-		});
-		healthService.start();
-	}
-	service.start();
-	const server = createInstructionServer(service, healthReceiver);
-	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(config.port, config.host, resolve);
+	const healthIntegration = config.health ? createHealthGatewayIntegration(config.health, store) : undefined;
+	const server = createInstructionServer(service, healthIntegration?.receiver);
+	const gateway = await startGatewayListener({
+		server,
+		host: config.host,
+		port: config.port,
+		service,
+		healthService: healthIntegration?.service,
 	});
 	console.log(`agent webhook gateway listening on http://${config.host}:${config.port}/v1/instructions`);
-	if (healthReceiver) {
+	if (healthIntegration) {
 		console.log(`health webhook receiver listening on http://${config.host}:${config.port}/v1/health-events`);
 	}
 
 	let shutdownPromise: Promise<void> | undefined;
 	const shutdown = (): Promise<void> => {
-		if (shutdownPromise) {
-			return shutdownPromise;
-		}
-		shutdownPromise = (async () => {
-			await new Promise<void>((resolve, reject) => {
-				server.close((error) => (error ? reject(error) : resolve()));
-			});
-			await healthService?.close();
-			await service.close();
-		})();
+		shutdownPromise ??= gateway.close();
 		return shutdownPromise;
 	};
-	process.once("SIGINT", () => {
-		void shutdown().then(() => {
-			process.exitCode = 0;
-		});
-	});
-	process.once("SIGTERM", () => {
-		void shutdown().then(() => {
-			process.exitCode = 0;
-		});
-	});
+	const handleShutdown = (): void => {
+		void shutdown().then(
+			() => {
+				process.exitCode = 0;
+			},
+			(error: unknown) => {
+				console.error(error instanceof Error ? error.message : String(error));
+				process.exitCode = 1;
+			},
+		);
+	};
+	process.once("SIGINT", handleShutdown);
+	process.once("SIGTERM", handleShutdown);
 }
 
 await main().catch((error: unknown) => {

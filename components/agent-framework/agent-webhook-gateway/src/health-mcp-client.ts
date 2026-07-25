@@ -12,6 +12,8 @@ const MCP_PROTOCOL_VERSION = "2025-11-25";
 
 export class HealthMcpProtocolError extends Error {}
 
+export class HealthMcpSessionExpiredError extends Error {}
+
 export interface HealthMcpJsonRpcTransport {
 	readonly sessionGeneration?: number;
 	request(method: string, params: JsonObject, signal?: AbortSignal): Promise<JsonObject>;
@@ -45,8 +47,8 @@ export class StreamableHttpHealthMcpTransport implements HealthMcpJsonRpcTranspo
 		const response = await this.postJsonRpc({ jsonrpc: "2.0", id, method, params }, externalSignal, sessionId);
 		if (response.status === 404 && sessionId) {
 			await response.body?.cancel();
-			this.invalidateSession();
-			throw new Error("Health MCP HTTP session expired");
+			this.invalidateSession(sessionId);
+			throw new HealthMcpSessionExpiredError("Health MCP HTTP session expired");
 		}
 		if (!response.ok) {
 			await response.body?.cancel();
@@ -65,8 +67,8 @@ export class StreamableHttpHealthMcpTransport implements HealthMcpJsonRpcTranspo
 		const response = await this.postJsonRpc({ jsonrpc: "2.0", method, params }, undefined, sessionId);
 		if (response.status === 404 && sessionId) {
 			await response.body?.cancel();
-			this.invalidateSession();
-			throw new Error("Health MCP HTTP session expired");
+			this.invalidateSession(sessionId);
+			throw new HealthMcpSessionExpiredError("Health MCP HTTP session expired");
 		}
 		if (response.status !== 202) {
 			await response.body?.cancel();
@@ -110,7 +112,10 @@ export class StreamableHttpHealthMcpTransport implements HealthMcpJsonRpcTranspo
 		this.sessionId = sessionId;
 	}
 
-	private invalidateSession(): void {
+	private invalidateSession(expiredSessionId: string): void {
+		if (this.sessionId !== expiredSessionId) {
+			return;
+		}
 		this.sessionId = undefined;
 		this.generation += 1;
 	}
@@ -217,40 +222,49 @@ export class HealthMcpClient implements HealthMcpToolCaller {
 		arguments_: Readonly<Record<string, unknown>>,
 		signal?: AbortSignal,
 	): Promise<HealthMcpToolResult> {
-		await this.initialize();
-		const result = await this.transport.request(
-			"tools/call",
-			{
-				name,
-				arguments: { ...arguments_ },
-			},
-			signal,
-		);
-		const structuredContent = result.structuredContent;
-		const content = result.content;
-		if (!isJsonObject(structuredContent) || typeof result.isError !== "boolean") {
-			throw new HealthMcpProtocolError("Health MCP tools/call result is missing structuredContent or isError");
+		for (let attempt = 0; ; attempt += 1) {
+			try {
+				await this.initialize();
+				const result = await this.transport.request(
+					"tools/call",
+					{
+						name,
+						arguments: { ...arguments_ },
+					},
+					signal,
+				);
+				const structuredContent = result.structuredContent;
+				const content = result.content;
+				if (!isJsonObject(structuredContent) || typeof result.isError !== "boolean") {
+					throw new HealthMcpProtocolError("Health MCP tools/call result is missing structuredContent or isError");
+				}
+				if (!Array.isArray(content) || content.length !== 1) {
+					throw new HealthMcpProtocolError("Health MCP tools/call result must contain exactly one TextContent");
+				}
+				const textContent = content[0];
+				if (!isJsonObject(textContent) || textContent.type !== "text" || typeof textContent.text !== "string") {
+					throw new HealthMcpProtocolError("Health MCP tools/call result contains invalid TextContent");
+				}
+				let textEnvelope: unknown;
+				try {
+					textEnvelope = JSON.parse(textContent.text);
+				} catch {
+					throw new HealthMcpProtocolError("Health MCP TextContent is not valid JSON");
+				}
+				if (!isDeepStrictEqual(textEnvelope, structuredContent)) {
+					throw new HealthMcpProtocolError("Health MCP TextContent does not equal structuredContent");
+				}
+				return {
+					isError: result.isError,
+					structuredContent,
+				};
+			} catch (error) {
+				if (attempt === 0 && error instanceof HealthMcpSessionExpiredError) {
+					continue;
+				}
+				throw error;
+			}
 		}
-		if (!Array.isArray(content) || content.length !== 1) {
-			throw new HealthMcpProtocolError("Health MCP tools/call result must contain exactly one TextContent");
-		}
-		const textContent = content[0];
-		if (!isJsonObject(textContent) || textContent.type !== "text" || typeof textContent.text !== "string") {
-			throw new HealthMcpProtocolError("Health MCP tools/call result contains invalid TextContent");
-		}
-		let textEnvelope: unknown;
-		try {
-			textEnvelope = JSON.parse(textContent.text);
-		} catch {
-			throw new HealthMcpProtocolError("Health MCP TextContent is not valid JSON");
-		}
-		if (!isDeepStrictEqual(textEnvelope, structuredContent)) {
-			throw new HealthMcpProtocolError("Health MCP TextContent does not equal structuredContent");
-		}
-		return {
-			isError: result.isError,
-			structuredContent,
-		};
 	}
 
 	private initialize(): Promise<void> {

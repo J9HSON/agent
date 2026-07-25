@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	agentSessionEventToRunLog,
 	buildAgentSystemPrompt,
 	createDogTools,
 	createPiAgentSession,
@@ -92,6 +93,64 @@ describe("fixed Pi agent runtime", () => {
 			content: [{ type: "text", text: "queued" }],
 		});
 		expect(calls).toEqual([{ name: "speak", arguments: { text: "请注意前方。" } }]);
+	});
+
+	it("maps Agent session boundaries to structured logs without streaming reasoning deltas", () => {
+		expect(agentSessionEventToRunLog({ type: "agent_start" })).toEqual({ event: "agent.run_started" });
+		expect(
+			agentSessionEventToRunLog({
+				type: "tool_execution_start",
+				toolCallId: "call-1",
+				toolName: "move_forward",
+				args: { speed_mps: 0.1, duration_s: 2 },
+			}),
+		).toEqual({
+			event: "agent.tool_started",
+			tool_call_id: "call-1",
+			tool_name: "move_forward",
+			arguments: '{"speed_mps":0.1,"duration_s":2}',
+		});
+		expect(
+			agentSessionEventToRunLog({
+				type: "tool_execution_end",
+				toolCallId: "call-1",
+				toolName: "move_forward",
+				result: { content: [{ type: "text", text: "accepted" }], details: {} },
+				isError: false,
+			}),
+		).toEqual({
+			event: "agent.tool_completed",
+			tool_call_id: "call-1",
+			tool_name: "move_forward",
+			is_error: false,
+			output: "accepted",
+		});
+		expect(
+			agentSessionEventToRunLog({
+				type: "message_update",
+				message: { role: "assistant", content: [], api: "test", provider: "test", model: "test" },
+				assistantMessageEvent: {
+					type: "thinking_delta",
+					delta: "private reasoning",
+					partial: { role: "assistant", content: [], api: "test", provider: "test", model: "test" },
+				},
+			} as never),
+		).toBeUndefined();
+		expect(
+			agentSessionEventToRunLog({
+				type: "auto_retry_start",
+				attempt: 1,
+				maxAttempts: 3,
+				delayMs: 100,
+				errorMessage: "Authorization: Bearer sk-secret-value",
+			}),
+		).toEqual({
+			event: "agent.retry_started",
+			attempt: 1,
+			max_attempts: 3,
+			delay_ms: 100,
+			error: "Authorization: [redacted]",
+		});
 	});
 
 	it("keeps robot and TTS MCP tools active while disabling built-in coding tools", async () => {

@@ -1,5 +1,6 @@
 import {
 	type AgentSession,
+	type AgentSessionEvent,
 	createAgentSession,
 	DefaultResourceLoader,
 	defineTool,
@@ -7,7 +8,8 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { McpToolCaller, UserTextAgent } from "./types.ts";
+import { describeGatewayLogText } from "./logging.ts";
+import type { AgentRunLogEvent, McpToolCaller, UserTextAgent } from "./types.ts";
 
 export function buildAgentSystemPrompt(defaultSpeedMps: number, ttsEnabled = false): string {
 	return `你是一个通过 MCP 控制机器狗的本地探索 Agent。
@@ -447,6 +449,114 @@ export interface PiUserTextAgentOptions {
 	ttsMcp?: McpToolCaller;
 }
 
+export function agentSessionEventToRunLog(event: AgentSessionEvent): AgentRunLogEvent | undefined {
+	switch (event.type) {
+		case "agent_start":
+			return { event: "agent.run_started" };
+		case "turn_start":
+			return { event: "agent.turn_started" };
+		case "message_start":
+			return isAssistantMessage(event.message) ? { event: "agent.response_started" } : undefined;
+		case "message_end": {
+			if (!isAssistantMessage(event.message)) {
+				return undefined;
+			}
+			const output = readTextContent(event.message);
+			return {
+				event: "agent.response_completed",
+				...(output === undefined ? {} : { output }),
+			};
+		}
+		case "tool_execution_start":
+			return {
+				event: "agent.tool_started",
+				tool_call_id: event.toolCallId,
+				tool_name: event.toolName,
+				arguments: describeLogValue(event.args),
+			};
+		case "tool_execution_end": {
+			const output = readTextContent(event.result);
+			return {
+				event: "agent.tool_completed",
+				tool_call_id: event.toolCallId,
+				tool_name: event.toolName,
+				is_error: event.isError,
+				...(output === undefined ? {} : { output }),
+			};
+		}
+		case "turn_end": {
+			const stopReason =
+				isRecord(event.message) && typeof event.message.stopReason === "string"
+					? describeGatewayLogText(event.message.stopReason)
+					: undefined;
+			return {
+				event: "agent.turn_completed",
+				tool_result_count: event.toolResults.length,
+				...(stopReason === undefined ? {} : { stop_reason: stopReason }),
+			};
+		}
+		case "agent_end":
+			return { event: "agent.run_completed", will_retry: event.willRetry };
+		case "auto_retry_start":
+			return {
+				event: "agent.retry_started",
+				attempt: event.attempt,
+				max_attempts: event.maxAttempts,
+				delay_ms: event.delayMs,
+				error: describeGatewayLogText(event.errorMessage),
+			};
+		case "auto_retry_end":
+			return {
+				event: "agent.retry_completed",
+				success: event.success,
+				attempt: event.attempt,
+				...(event.finalError === undefined ? {} : { final_error: describeGatewayLogText(event.finalError) }),
+			};
+		case "compaction_start":
+			return { event: "agent.compaction_started", reason: event.reason };
+		case "compaction_end":
+			return {
+				event: "agent.compaction_completed",
+				reason: event.reason,
+				aborted: event.aborted,
+				will_retry: event.willRetry,
+				...(event.errorMessage === undefined ? {} : { error: describeGatewayLogText(event.errorMessage) }),
+			};
+		default:
+			return undefined;
+	}
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+	return typeof value === "object" && value !== null;
+}
+
+function isAssistantMessage(value: unknown): value is Readonly<Record<string, unknown>> {
+	return isRecord(value) && value.role === "assistant";
+}
+
+function readTextContent(value: unknown): string | undefined {
+	if (!isRecord(value) || !Array.isArray(value.content)) {
+		return undefined;
+	}
+	const text = value.content
+		.filter(
+			(item): item is Readonly<{ type: "text"; text: string }> =>
+				isRecord(item) && item.type === "text" && typeof item.text === "string",
+		)
+		.map((item) => item.text)
+		.join("");
+	return text.length === 0 ? undefined : describeGatewayLogText(text);
+}
+
+function describeLogValue(value: unknown): string {
+	try {
+		return describeGatewayLogText(JSON.stringify(value) ?? "undefined");
+	} catch {
+		return "[unserializable]";
+	}
+}
+
 export async function createPiAgentSession(options: PiUserTextAgentOptions): Promise<AgentSession> {
 	const settingsManager = SettingsManager.create(options.cwd, options.agentDir);
 	const resourceLoader = new DefaultResourceLoader({
@@ -485,18 +595,30 @@ export class PiUserTextAgent implements UserTextAgent {
 		return new PiUserTextAgent(await createPiAgentSession(options));
 	}
 
-	async run(text: string): Promise<string> {
+	async run(text: string, onLog?: (event: AgentRunLogEvent) => void): Promise<string> {
 		const assistantMessagesBefore = this.session.messages.filter((message) => message.role === "assistant").length;
-		await this.session.prompt(text, { expandPromptTemplates: false });
-		const assistantMessagesAfter = this.session.messages.filter((message) => message.role === "assistant").length;
-		if (assistantMessagesAfter <= assistantMessagesBefore) {
-			throw new Error("Agent did not produce a final assistant message");
+		const unsubscribe = onLog
+			? this.session.subscribe((event) => {
+					const logEvent = agentSessionEventToRunLog(event);
+					if (logEvent) {
+						onLog(logEvent);
+					}
+				})
+			: undefined;
+		try {
+			await this.session.prompt(text, { expandPromptTemplates: false });
+			const assistantMessagesAfter = this.session.messages.filter((message) => message.role === "assistant").length;
+			if (assistantMessagesAfter <= assistantMessagesBefore) {
+				throw new Error("Agent did not produce a final assistant message");
+			}
+			const assistantText = this.session.getLastAssistantText();
+			if (!assistantText) {
+				throw new Error("Agent produced an empty final assistant message");
+			}
+			return assistantText;
+		} finally {
+			unsubscribe?.();
 		}
-		const assistantText = this.session.getLastAssistantText();
-		if (!assistantText) {
-			throw new Error("Agent produced an empty final assistant message");
-		}
-		return assistantText;
 	}
 
 	close(): void {

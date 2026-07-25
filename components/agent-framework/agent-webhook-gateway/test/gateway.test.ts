@@ -84,7 +84,29 @@ describe("Agent input webhook", () => {
 		const logs: string[] = [];
 		const service = new AgentWebhookService({
 			store: new GatewayStore(databasePath),
-			agent: { run: async () => "internal final text" },
+			agent: {
+				run: async (_text, onLog) => {
+					onLog?.({ event: "agent.run_started" });
+					onLog?.({ event: "agent.turn_started" });
+					onLog?.({
+						event: "agent.tool_started",
+						tool_call_id: "call-1",
+						tool_name: "server_status",
+						arguments: "{}",
+					});
+					onLog?.({
+						event: "agent.tool_completed",
+						tool_call_id: "call-1",
+						tool_name: "server_status",
+						is_error: false,
+						output: "ready",
+					});
+					onLog?.({ event: "agent.response_completed", output: "internal final text" });
+					onLog?.({ event: "agent.turn_completed", tool_result_count: 1, stop_reason: "stop" });
+					onLog?.({ event: "agent.run_completed", will_retry: false });
+					return "internal final text";
+				},
+			},
 			mcp: {
 				callTool: async () => {
 					throw new Error("MCP should not be called by this instruction");
@@ -111,7 +133,21 @@ describe("Agent input webhook", () => {
 			});
 			await waitFor(() => logs.some((line) => line.includes("instruction.completed")));
 			const events = logs.map((line) => /^\[agent-webhook\] \S+Z (\S+) /u.exec(line)?.[1]).filter(Boolean);
-			expect(events).toEqual(["instruction.accepted", "instruction.processing", "instruction.completed"]);
+			expect(events).toEqual([
+				"instruction.accepted",
+				"instruction.processing",
+				"agent.run_started",
+				"agent.turn_started",
+				"agent.tool_started",
+				"agent.tool_completed",
+				"agent.response_completed",
+				"agent.turn_completed",
+				"agent.run_completed",
+				"instruction.agent_completed",
+				"instruction.completed",
+			]);
+			expect(logs.join("\n")).toContain('"output":"internal final text"');
+			expect(logs.join("\n")).toContain('"instruction_id":"instruction-1","tool_call_id":"call-1"');
 			expect(logs.join("\n")).not.toContain("reply.");
 		} finally {
 			await service.close();

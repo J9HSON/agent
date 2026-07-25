@@ -266,27 +266,26 @@ Windows PowerShell：
 
 ~~~powershell
 Set-Location "C:/absolute/path/to/pi-hackason/components/agent-framework/agent-webhook-gateway"
-npm ci --ignore-scripts
+npm ci --include=dev --ignore-scripts
 npm run build
 $env:AGENT_WEBHOOK_TTS_MCP_URL = "http://tts-device:9992/mcp"
 node dist/cli.js
 ~~~
 
-Ubuntu 24.04 arm64（地瓜派）使用 Node 官方 Linux ARM64 构建。systemd 单元只在 `/usr/local/bin`、`/usr/bin` 和 `/bin` 查找 Node，`command -v node` 必须返回其中之一；不要只把 Node 安装在交互 shell 才加载的 nvm 目录。不要复制 x64/Windows 的 `node_modules` 或构建产物；在板端从锁文件安装并构建：
+Ubuntu 22.04/24.04 arm64（地瓜派）使用 Node 官方 Linux ARM64 构建。systemd 单元只在 `/usr/local/bin`、`/usr/bin` 和 `/bin` 查找 Node，`command -v node` 必须返回其中之一；不要只把 Node 安装在交互 shell 才加载的 nvm 目录。不要复制 x64/Windows 的 `node_modules` 或构建产物；在板端从锁文件安装并构建：
 
 ~~~bash
 cd "$HOME/pi-hackason/components/agent-framework/agent-webhook-gateway"
 test "$(uname -m)" = "aarch64"
 node -p '`${process.platform}/${process.arch}`'
 command -v node
-npm ci --ignore-scripts
+npm ci --include=dev --ignore-scripts
 npm run build
 cp .env.example .env
 # 如需语音，在 .env 中配置 AGENT_WEBHOOK_TTS_MCP_URL。
-npm run preflight:ubuntu-arm64
 ~~~
 
-Node 输出必须为 `linux/arm64`，版本必须不低于 22.19.0。预检会核对 Ubuntu 24.04、arm64、Node 版本、内置 SQLite、构建产物、生产依赖、既有 SQLite 文件及 Pi 配置目录权限，并初始化缺失的 data/session 目录；不会连接模型、DIMOS 或真实机器狗。官方 user-level systemd 单元位于 `deploy/ubuntu-arm64/agent-webhook-gateway.service`，默认仓库路径为 `$HOME/pi-hackason`：
+Node 输出必须为 `linux/arm64`，版本必须不低于 22.19.0。构建必须保留开发依赖，以使用锁定的 TypeScript 5.9.3 及其完整标准库；不要依赖 Ubuntu 全局安装的 `tsc`。官方 user-level systemd 单元位于 `deploy/ubuntu-arm64/agent-webhook-gateway.service`，默认仓库路径为 `$HOME/pi-hackason`：
 
 ~~~bash
 mkdir -p "$HOME/.config/systemd/user"
@@ -319,7 +318,7 @@ POST http://网关主机:8080/v1/instructions
 | `AGENT_WEBHOOK_SESSION_DIR` | `<cwd>/data/agent-session` | 固定 Agent 会话目录。 |
 | `AGENT_WEBHOOK_DEFAULT_SPEED_MPS` | `0.1` | 仅距离请求的部署标定速度。 |
 
-网关标准输出会以 `[agent-webhook] <ISO 时间> <事件名> <JSON 字段>` 的单行格式记录 instruction 生命周期，包括请求被接受或拒绝、幂等重投、Agent/停止处理和完成状态。没有任何 `reply.*` 事件。成功日志包含完整用户文本；失败日志只包含简短错误消息，不打印异常堆栈，畸形请求也不会回显原始 body。终端日志因此属于敏感运行数据，只应保留在受控环境。
+网关标准输出会以 `[agent-webhook] <ISO 时间> <事件名> <JSON 字段>` 的单行格式记录 instruction 生命周期。普通 Agent 指令依次记录 `instruction.accepted`、`instruction.processing`，以及 `agent.run_started`、每一轮的 `agent.turn_started` / `agent.turn_completed`、assistant 的 `agent.response_started` / `agent.response_completed`、每次工具调用的 `agent.tool_started` / `agent.tool_completed`、自动重试的 `agent.retry_started` / `agent.retry_completed`、上下文压缩的 `agent.compaction_started` / `agent.compaction_completed`、`agent.run_completed`、带最终内部文本的 `instruction.agent_completed`，最后记录 `instruction.completed`。每条 Agent 日志都带同一 `instruction_id`；工具日志还带 `tool_call_id`、工具名、参数、是否失败和文本结果。逐 token 更新和模型私有推理不会记录，也没有任何 `reply.*` 事件；最终文本日志不等于出站回复。文本字段会做常见凭据脱敏并限制为 2000 字符，错误不打印堆栈，畸形请求不回显原始 body，但日志仍包含用户、模型和工具内容，因此属于敏感运行数据，只应保留在受控环境。
 
 当前 TTS 传输直接发送无状态 HTTP JSON-RPC `tools/call`，不执行标准 MCP `initialize` 或 session 协商。完整 HTTP schema、`speak(text)` profile、停止口令规则和验收清单见 [Agent 输入 Webhook 与 TTS MCP 对接指南](docs/agent-input-webhook-integration.md)。
 
@@ -333,7 +332,7 @@ $env:AGENT_WEBHOOK_HEALTH_MCP_URL = "http://项圈上位机IP:8765/mcp"
 node dist/cli.js
 ~~~
 
-`AGENT_WEBHOOK_HEALTH_MCP_URL` 必须是项圈上位机提供的 MCP 2025-11-25 Streamable HTTP endpoint。Gateway 会完成 initialize、可选 session 协商和两个只读 tool call，不会 spawn Python 或读取上位机文件。启用后接收：
+`AGENT_WEBHOOK_HEALTH_MCP_URL` 必须是项圈上位机提供的、不含用户名或密码的 MCP 2025-11-25 Streamable HTTP endpoint。Gateway 会完成 initialize、可选 session 协商和两个只读 tool call；session 返回 `404` 时会立即重新 initialize，并只重试一次当前只读调用。Gateway 不会 spawn Python 或读取上位机文件。启用后接收：
 
 ~~~text
 POST http://网关主机:8080/v1/health-events
@@ -448,7 +447,7 @@ python -m unittest discover -s tests -v
 
 ~~~powershell
 Set-Location "C:/absolute/path/to/pi-hackason/components/agent-framework/agent-webhook-gateway"
-npm ci --ignore-scripts
+npm ci --include=dev --ignore-scripts
 npm run demo:dry-run
 ~~~
 
@@ -477,6 +476,7 @@ node node_modules/vitest/dist/cli.js --run test/health-mcp-client.test.ts
 | 动作未按预期结束 | 立即调用 `stop_all`，检查返回的 `failed_components` 和逐项 `results`，再检查下层日志与独立急停状态。 |
 | 导航、探索、巡逻或散步没有停止 | 不要调用已隐藏的专项停止方法；再次确认 `stop_all` 已到达底层，并按其逐项结果定位失败组件。 |
 | 输入已 `202` 但硬件没有播报 | `202` 只表示输入已持久化。检查是否配置 `AGENT_WEBHOOK_TTS_MCP_URL`、模型是否调用 `speak` 以及 TTS MCP 工具结果；不要等待回复 Webhook。 |
+| 日志只有 `instruction.completed`，看不到 Agent 输出 | 更新并重新构建 Gateway；新版会记录 `agent.*` 处理边界和 `instruction.agent_completed.output`。该 output 只是内部最终文本，真实播报仍以 `agent.tool_started` / `agent.tool_completed` 中的 `speak` 调用为准。 |
 | `/v1/health-events` 返回 `404` | Health 配置未启用；检查 `AGENT_WEBHOOK_HEALTH_WEARER_ID` 是否在启动前设置。 |
 | Health 联调端希望配置 key、secret 或签名 | 当前 Health 入口已完全移除鉴权；这些配置和 Header 均不需要，旧 Header 即使存在也会被忽略。 |
 | Gateway 启动时报缺少 `AGENT_WEBHOOK_HEALTH_MCP_URL` | Health 跨机消费要求 wearer 与上位机 URL 同时配置；URL 应形如 `http://<项圈上位机IP>:8765/mcp`。 |
